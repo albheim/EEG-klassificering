@@ -13,6 +13,18 @@
 
 #SBATCH --mem-per-cpu=3100
 
+DATA_DIR="$(cat ../data_location.txt)"
 
 
-python main.py
+echo "start time"
+date
+
+cp -r $DATA_DIR $SNIC_TMP
+
+echo "copy done time"
+date
+
+python main.py $SNIC_TMP
+
+echo "end time"
+date
