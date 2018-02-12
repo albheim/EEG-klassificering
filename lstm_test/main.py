@@ -43,7 +43,7 @@ for sub in [i if i < 10 else i + 1 for i in range(1, 2)]:  # 19 is max
             y = np.concatenate((y, labels), axis=0)
 
 n = x.shape[0]
-tr = int(0.8 * n)
+tr = int(1 * n)  # Currently use all data in training set
 
 x = np.stack(x, axis=0)
 
@@ -73,15 +73,17 @@ def kfold_split(n, k):
         yield (tr, val)
 
 
+splits = 10
 n_models = 10
 avgacc = [0] * n_models
+models = [[None] * n_models] * splits
 first = True
 
-for train, val in kfold_split(xtr.shape[0], n_models):
+for train, val in kfold_split(xtr.shape[0], splits):
 
     for i in range(n_models):
         model = Sequential()
-        model.add(CuDNNLSTM((i + 2) * 5, input_shape=xtr[0].shape))  # returns a sequence of vectors of dimension 32
+        model.add(LSTM((i + 2) * 5, input_shape=xtr[0].shape))  # returns a sequence of vectors of dimension 32
         model.add(Dropout(0.5))
         model.add(Dense(32, activation='tanh'))
         model.add(Dense(3, activation='softmax'))
@@ -102,4 +104,4 @@ for train, val in kfold_split(xtr.shape[0], n_models):
     first = False
 
 
-print("\n".join(["{}, accuracy: {}".format((i + 2) * 5, avgacc[i] / n_models) for i in range(n_models)]))
+print("\n".join(["{}, accuracy: {}".format((i + 2) * 5, avgacc[i] / splits) for i in range(n_models)]))
