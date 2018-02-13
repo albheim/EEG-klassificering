@@ -20,7 +20,9 @@ print(device_lib.list_local_devices())
 
 
 seed = 7
-snic_tmp = str(sys.argv[1])
+snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
+if len(sys.argv) > 1:
+    snic_tmp = str(sys.argv[1])
 
 x = None
 y = None
@@ -105,7 +107,7 @@ def get_random_setting():
 
 
 splits = 10
-n_models = 1000
+n_models = 100
 avgacc = [0 for i in range(n_models)]
 models = [None for i in range(n_models)]
 
