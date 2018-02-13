@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 01:55:00
-#SBATCH -J lstm eeg
+#SBATCH -J lstm_eeg
 #SBATCH -A lu2018-2-3
 #SBATCH -o stdout_%j.out
 #SBATCH -e stderr_%j.err

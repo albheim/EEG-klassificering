@@ -105,7 +105,7 @@ def get_random_setting():
 
 
 splits = 10
-n_models = 1000
+n_models = 100
 avgacc = [0 for i in range(n_models)]
 models = [None for i in range(n_models)]
 
