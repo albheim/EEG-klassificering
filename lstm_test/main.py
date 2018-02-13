@@ -76,16 +76,19 @@ def kfold_split(n, k):
 
 
 def get_random_setting():
-    first_layer_nodes = np.random.randint(10, 100)
-    first_layer_dropout = np.random.ranf()
-    first_layer_return_seq = np.random.choice([True, False])
-
     second_layer = np.random.choice([True, False])
     second_layer_type = np.random.choice([LSTM, Dense])
     second_layer_nodes = np.random.randint(10, 100)
-    second_layer_dropout = np.random.ranf()
+    second_layer_dropout = np.random.ranf() * 0.5 + 0.25
 
-    output = np.random.choice([LSTM, Dense])
+    first_layer_nodes = np.random.randint(10, 100)
+    first_layer_dropout = np.random.ranf() * 0.5 + 0.25
+    if second_layer:
+        first_layer_return_seq = np.random.choice([True, False])
+    else:
+        first_layer_return_seq = False
+
+    output = np.random.choice([Dense])
 
     epochs = np.random.randint(10, 100)
 
@@ -118,9 +121,9 @@ for i in range(n_models):
                    return_sequences=models[i]["first_layer_return_seq"]))
     model.add(Dropout(models[i]["first_layer_dropout"]))
 
-    if models[i]["seconds_layer"]:
+    if models[i]["second_layer"]:
         model.add(models[i]["second_layer_type"](models[i]["second_layer_nodes"], activation='tanh'))
-        model.add(Dropout(models[i]["second_layer_dropout"]))
+        #model.add(Dropout(models[i]["second_layer_dropout"]))
 
     model.add(models[i]["output_type"](3, activation='softmax'))
 
