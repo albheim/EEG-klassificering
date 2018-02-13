@@ -33,6 +33,8 @@ for sub in [i if i < 10 else i + 1 for i in range(1, 2)]:  # 19 is max
         print(name)
         m = io.loadmat('{}/DATA/Visual/{}.mat'.format(snic_tmp, name))
         trials = m[name][0][0][2][0]
+        for j in range(trials.shape[0]):
+            trials[j] = trials[j][:, 768:1536]
         labels = np.zeros((trials.shape[0], 3))
         labels[:, i] = 1
         if x is None:
@@ -73,35 +75,79 @@ def kfold_split(n, k):
         yield (tr, val)
 
 
+def get_random_setting():
+    first_layer_nodes = np.random.randint(10, 100)
+    first_layer_dropout = np.random.ranf()
+    first_layer_return_seq = np.random.choice([True, False])
+
+    second_layer = np.random.choice([True, False])
+    second_layer_type = np.random.choise([LSTM, Dense])
+    second_layer_nodes = np.random.randint(10, 100)
+    second_layer_dropout = np.random.ranf()
+
+    output = np.random.choice([LSTM, Dense])
+
+    epochs = np.random.randint(10, 100)
+
+    return {"first_layer_nodes": first_layer_nodes,
+            "first_layer_dropout": first_layer_dropout,
+            "first_layer_return_seq": first_layer_return_seq,
+            "second_layer": second_layer,
+            "second_layer_type": second_layer_type,
+            "second_layer_nodes": second_layer_nodes,
+            "second_layer_dropout": second_layer_dropout,
+            "output_type": output,
+            "epochs": epochs}
+
+
+
 splits = 10
-n_models = 10
-avgacc = [0] * n_models
-models = [[None] * n_models] * splits
-first = True
+n_models = 1000
+avgacc = [0 for i in range(n_models)]
+models = [None for i in range(n_models)]
 
-for train, val in kfold_split(xtr.shape[0], splits):
+kfold = [i for i in kfold_split(xtr.shape[0], splits)]
 
-    for i in range(n_models):
-        model = Sequential()
-        model.add(LSTM((i + 2) * 5, input_shape=xtr[0].shape))  # returns a sequence of vectors of dimension 32
-        model.add(Dropout(0.5))
-        model.add(Dense(32, activation='tanh'))
-        model.add(Dense(3, activation='softmax'))
-        if first:
-            model.summary()
+for i in range(n_models):
+    models[i] = get_random_setting()
+    model = Sequential()
 
-        model.compile(loss='categorical_crossentropy',
-                      optimizer='rmsprop',
-                      metrics=['accuracy'])
+    # returns a sequence of vectors of dimension 32
+    model.add(LSTM(models[i]["first_layer_nodes"],
+                   input_shape=xtr[0].shape,
+                   return_sequences=models[i]["first_layer_return_seq"]))
+    model.add(Dropout(models[i]["first_layer_dropout"]))
 
+    if models[i]["seconds_layer"]:
+        model.add(models[i]["second_layer_type"](models[i]["second_layer_nodes"], activation='tanh'))
+        model.add(Dropout(models[i]["second_layer_dropout"]))
+
+    model.add(models[i]["output_type"](3, activation='softmax'))
+
+    model.compile(loss='categorical_crossentropy',
+                    optimizer='rmsprop',
+                    metrics=['accuracy'])
+
+    w_save = model.get_weights()
+
+    model.summary()
+
+    for train, val in kfold:
+        # reset to initial weights
+        model.set_weights(w_save)
+        # fit with next kfold data
         model.fit(xtr[train], ytr[train],
-                  batch_size=64, epochs=10, verbose=0,
-                  validation_data=(xtr[val], ytr[val]))
+                  batch_size=64, epochs=models[i]["epochs"], verbose=0)
 
         loss, accuracy = model.evaluate(xtr[val], ytr[val], verbose=0)
         avgacc[i] += accuracy
 
-    first = False
+    avgacc[i] /= splits
+    print("acc: {}   {}".format(avgacc[i], models[i]))
 
+sort = np.argsort(avgacc)
+avgacc = avgacc[sort]
+models = models[sort]
 
-print("\n".join(["{}, accuracy: {}".format((i + 2) * 5, avgacc[i] / splits) for i in range(n_models)]))
+print("\n\n")
+print("\n".join(["acc: {}   {}".format(avgacc[i], models[i]) for i in range(n_models)]))
