@@ -1,6 +1,6 @@
 #!/bin/sh
-#SBATCH -t 00:55:00
-#SBATCH -J nameOfJob
+#SBATCH -t 01:55:00
+#SBATCH -J lstm eeg
 #SBATCH -A lu2018-2-3
 #SBATCH -o stdout_%j.out
 #SBATCH -e stderr_%j.err
@@ -14,6 +14,7 @@
 #SBATCH --mem-per-cpu=3100
 
 DATA_DIR="$(cat ../data_location.txt)"
+echo $DATA_DIR
 
 
 echo "start time"

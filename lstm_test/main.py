@@ -81,7 +81,7 @@ def get_random_setting():
     first_layer_return_seq = np.random.choice([True, False])
 
     second_layer = np.random.choice([True, False])
-    second_layer_type = np.random.choise([LSTM, Dense])
+    second_layer_type = np.random.choice([LSTM, Dense])
     second_layer_nodes = np.random.randint(10, 100)
     second_layer_dropout = np.random.ranf()
 
@@ -125,8 +125,8 @@ for i in range(n_models):
     model.add(models[i]["output_type"](3, activation='softmax'))
 
     model.compile(loss='categorical_crossentropy',
-                    optimizer='rmsprop',
-                    metrics=['accuracy'])
+                  optimizer='rmsprop',
+                  metrics=['accuracy'])
 
     w_save = model.get_weights()
 
