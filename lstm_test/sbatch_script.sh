@@ -20,7 +20,7 @@ echo $DATA_DIR
 echo "script"
 cat $0
 
-PY_FILE="all_single.py"
+PY_FILE="test.py"
 echo "py file"
 cat $PY_FILE
 

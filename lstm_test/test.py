@@ -16,9 +16,8 @@ from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
 
 from tensorflow.python.client import device_lib
-# print(device_lib.list_local_devices())
+print(device_lib.list_local_devices())
 
-print("aasdf")
 
 snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
 if len(sys.argv) > 1:
@@ -58,7 +57,6 @@ for sub in [i if i < 10 else i + 1 for i in range(1, 19)]:  # 19 is max
 xtr = x
 ytr = y
 
-
 def kfold_split(n, k):
     s = np.arange(n)
     np.random.shuffle(s)
@@ -67,41 +65,37 @@ def kfold_split(n, k):
         tr = np.concatenate((s[:int(n * a / k)], s[int(n * (a + 1) / k):]))
         yield (tr, val)
 
-
 splits = 10
 n_subs = len(xtr)
-n_models = 1
 
+model = Sequential()
+model.add(LSTM(32, input_shape=xtr[0][0].shape,
+               return_sequences=True))
+model.add(Dropout(0.5))
+model.add(LSTM(16))
+model.add(Dense(3, activation='softmax'))
 
-for j in range(n_models):
-    model = Sequential()
-    model.add(LSTM(32, input_shape=xtr[0][0].shape,
-                   return_sequences=True))
-    model.add(Dropout(0.5))
-    model.add(LSTM(16))
-    model.add(Dense(3, activation='softmax'))
+model.compile(loss='categorical_crossentropy',
+              optimizer='rmsprop',
+              metrics=['accuracy'])
 
-    model.compile(loss='categorical_crossentropy',
-                  optimizer='rmsprop',
-                  metrics=['accuracy'])
+w_save = model.get_weights()
 
-    w_save = model.get_weights()
+model.summary()
 
-    model.summary()
+avgacc = [0 for i in range(n_subs)]
 
-    avgacc = [0 for i in range(n_subs)]
+for i in range(n_subs):
+    for train, val in kfold_split(xtr[i].shape[0], splits):
+        # reset to initial weights
+        model.set_weights(w_save)
+        # fit with next kfold data
+        model.fit(xtr[i][train], ytr[i][train],
+                  batch_size=64, epochs=50, verbose=0)
 
-    for i in range(n_subs):
-        for train, val in kfold_split(xtr[i].shape[0], splits):
-            # reset to initial weights
-            model.set_weights(w_save)
-            # fit with next kfold data
-            model.fit(xtr[i][train], ytr[i][train],
-                      batch_size=64, epochs=50, verbose=0)
+        loss, accuracy = model.evaluate(xtr[i][val], ytr[i][val], verbose=0)
+        avgacc[i] += accuracy
 
-            loss, accuracy = model.evaluate(xtr[i][val], ytr[i][val], verbose=0)
-            avgacc[i] += accuracy
-
-        avgacc[i] /= splits
-        print("sub: {}  acc: {}".format(i + 1 if i + 1 < 10 else i + 2, avgacc[i]))
-    print("model: {}   avgacc: {}".format(j, sum(avgacc) / n_subs))
+    avgacc[i] /= splits
+    print("sub: {}  acc: {}".format(i + 1 if i + 1 < 10 else i + 2, avgacc[i]))
+print("model: {}   avgacc: {}".format(j, sum(avgacc) / n_subs))
