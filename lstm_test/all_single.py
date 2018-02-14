@@ -76,7 +76,6 @@ def kfold_split(n, k):
 
 splits = 10
 n_subs = len(xtr)
-print(n_subs)
 n_models = 10
 
 
@@ -110,5 +109,5 @@ for j in range(n_models):
             avgacc[i] += accuracy
 
         avgacc[i] /= splits
-        print("sub: {}  acc: {}".format(i if i < 10 else i + 1, avgacc[i]))
+        print("sub: {}  acc: {}".format(i + 1 if i + 1 < 10 else i + 2, avgacc[i]))
     print("model: {}   avgacc: {}".format(j, sum(avgacc) / n_subs))
