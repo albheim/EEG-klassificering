@@ -19,7 +19,6 @@ from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
 
 
-seed = 7
 snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
 if len(sys.argv) > 1:
     snic_tmp = str(sys.argv[1])
