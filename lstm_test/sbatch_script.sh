@@ -2,8 +2,8 @@
 #SBATCH -t 03:55:00
 #SBATCH -J lstm_eeg
 #SBATCH -A lu2018-2-3
-#SBATCH -o stdout_%j.out
-#SBATCH -e stderr_%j.err
+#// SBATCH -o stdout_%j.out
+#// SBATCH -e stderr_%j.err
 
 # shold be lu or gpu
 #SBATCH -p gpu
@@ -28,6 +28,8 @@ echo "start time"
 date
 
 cp -r $DATA_DIR $SNIC_TMP
+ls $SNIC_TMP
+du -h "${SNIC_TMP}/DATA"
 
 echo "copy done time"
 date

@@ -3,8 +3,10 @@ import sys
 import numpy as np
 from scipy import io
 
+print("aasdf")
 import tensorflow as tf
 
+print("aasdf")
 from keras.models import Model, Sequential
 from keras.layers import Dense, Dropout, Flatten, Input, Activation
 from keras.layers import Conv2D, MaxPooling2D
@@ -12,12 +14,15 @@ from keras.layers import TimeDistributed
 from keras.layers import Lambda, concatenate
 from keras.layers import CuDNNLSTM, CuDNNGRU, SimpleRNN, RNN, LSTM, GRU
 
+print("aasdf")
 from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
 
+print("aasdf")
 from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
 
+print("aasdf")
 
 snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
 if len(sys.argv) > 1:
