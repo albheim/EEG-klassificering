@@ -1,5 +1,7 @@
+print("aasdf")
 import sys
 
+print("aasdf")
 import numpy as np
 from scipy import io
 
@@ -63,8 +65,6 @@ xtr = x
 ytr = y
 
 
-
-
 def kfold_split(n, k):
     s = np.arange(n)
     np.random.shuffle(s)
@@ -76,20 +76,20 @@ def kfold_split(n, k):
 
 splits = 10
 n_subs = len(xtr)
-n_models = 10
+n_models = 1
 
 
 for j in range(n_models):
     model = Sequential()
     model.add(LSTM(32, input_shape=xtr[0][0].shape,
-                return_sequences=True))
+                   return_sequences=True))
     model.add(Dropout(0.5))
     model.add(LSTM(16))
     model.add(Dense(3, activation='softmax'))
 
     model.compile(loss='categorical_crossentropy',
-                optimizer='rmsprop',
-                metrics=['accuracy'])
+                  optimizer='rmsprop',
+                  metrics=['accuracy'])
 
     w_save = model.get_weights()
 
@@ -103,7 +103,7 @@ for j in range(n_models):
             model.set_weights(w_save)
             # fit with next kfold data
             model.fit(xtr[i][train], ytr[i][train],
-                    batch_size=64, epochs=50, verbose=0)
+                      batch_size=64, epochs=50, verbose=0)
 
             loss, accuracy = model.evaluate(xtr[i][val], ytr[i][val], verbose=0)
             avgacc[i] += accuracy

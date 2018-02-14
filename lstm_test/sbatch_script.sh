@@ -8,7 +8,7 @@
 # shold be lu or gpu
 #SBATCH -p gpu
 
-# how many gpus
+# how many gpus, 2 per node?
 #SBATCH --gres=gpu:2
 
 #SBATCH --mem-per-cpu=3100
@@ -23,6 +23,9 @@ cat $0
 PY_FILE="all_single.py"
 echo "py file"
 cat $PY_FILE
+
+echo "nvidia smi"
+nvidia-smi
 
 echo "start time"
 date
