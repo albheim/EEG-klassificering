@@ -15,4 +15,7 @@ def lstm_lstm(input_shape, first_size=32, second_size=16, dropout_p=0.5):
 	model.add(Dropout(dropout_p))
 	model.add(LSTM(second_size))
 	model.add(Dense(3, activation='softmax'))
+
+    model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
+
 	return model
