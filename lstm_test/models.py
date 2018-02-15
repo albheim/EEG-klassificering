@@ -10,9 +10,12 @@ from keras import backend as K
 
 
 def lstm_lstm(input_shape, first_size=32, second_size=16, dropout_p=0.5):
-	model = Sequential()
-	model.add(LSTM(first_size, input_shape=input_shape, return_sequences=True))
-	model.add(Dropout(dropout_p))
-	model.add(LSTM(second_size))
-	model.add(Dense(3, activation='softmax'))
-	return model
+    model = Sequential()
+    model.add(LSTM(first_size, input_shape=input_shape, return_sequences=True))
+    model.add(Dropout(dropout_p))
+    model.add(LSTM(second_size))
+    model.add(Dense(3, activation='softmax'))
+
+    model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
+
+    return model
