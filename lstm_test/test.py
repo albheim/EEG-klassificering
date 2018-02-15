@@ -5,18 +5,19 @@ from scipy import io
 
 import tensorflow as tf
 
-from keras.models import Model, Sequential
-from keras.layers import Dense, Dropout, Flatten, Input, Activation
-from keras.layers import Conv2D, MaxPooling2D
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, Input
 from keras.layers import TimeDistributed
-from keras.layers import Lambda, concatenate
-from keras.layers import CuDNNLSTM, CuDNNGRU, SimpleRNN, RNN, LSTM, GRU
+from keras.layers import SimpleRNN, RNN, LSTM, GRU
 
 from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
 
 from tensorflow.python.client import device_lib
+print("here comes devices list")
 print(device_lib.list_local_devices())
+print("finished with device list")
+
 
 
 snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
@@ -69,17 +70,14 @@ splits = 10
 n_subs = len(xtr)
 
 model = Sequential()
-model.add(LSTM(32, input_shape=xtr[0][0].shape,
-               return_sequences=True))
+model.add(LSTM(32, input_shape=xtr[0][0].shape, return_sequences=True))
 model.add(Dropout(0.5))
-model.add(LSTM(16))
+# model.add(LSTM(16))
 model.add(Dense(3, activation='softmax'))
 
-model.compile(loss='categorical_crossentropy',
-              optimizer='rmsprop',
-              metrics=['accuracy'])
+model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
 
-w_save = model.get_weights()
+# w_save = model.get_weights()
 
 model.summary()
 
@@ -88,7 +86,7 @@ avgacc = [0 for i in range(n_subs)]
 for i in range(n_subs):
     for train, val in kfold_split(xtr[i].shape[0], splits):
         # reset to initial weights
-        model.set_weights(w_save)
+        # model.set_weights(w_save)
         # fit with next kfold data
         model.fit(xtr[i][train], ytr[i][train],
                   batch_size=64, epochs=50, verbose=0)
