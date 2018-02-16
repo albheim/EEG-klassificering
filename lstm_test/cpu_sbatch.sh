@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH -t 03:55:00
+#SBATCH -t 00:55:00
 #SBATCH -J lstm_eeg
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
@@ -17,12 +17,9 @@ echo $DATA_DIR
 echo "script"
 cat $0
 
-PY_FILE="all_single.py"
+PY_FILE="test.py"
 echo "py file"
 cat $PY_FILE
-
-echo "nvidia smi"
-nvidia-smi
 
 echo "start time"
 date

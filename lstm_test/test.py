@@ -20,41 +20,47 @@ print("finished with device list")
 
 import models
 import data
+import util
 
 
-xtr, ytr = data.load_single()
+x, y = data.load_single()
+
+splits = 5
+n_subs = len(x)
+
+mod = []
+for i in range(20):
+    mod.append(models.lstm_lstm(x[0][0].shape,
+                                np.random.randint(10, 90),
+                                np.random.randint(5, 50),
+                                np.random.ranf() * 0.5 + 0.25))
 
 
-def kfold_split(n, k):
-    s = np.arange(n)
-    np.random.shuffle(s)
-    for a in range(k):
-        val = s[int(n * a / k):int(n * (a + 1) / k)]
-        tr = np.concatenate((s[:int(n * a / k)], s[int(n * (a + 1) / k):]))
-        yield (tr, val)
 
-splits = 10
-n_subs = len(xtr)
+for model in mod:
+    model.summary()
+    w_save = model.get_weights()
+    avgacc = 0
+    for i in range(n_subs):
+        n = x[i].shape[0]
+        acc = 0
+        for tr, val in util.kfold(n, splits):
+            # reset to initial weights
+            model.set_weights(w_save)
 
-model = models.lstm_lstm(xtr[0][0].shape)
+            # fit with next kfold data
+            model.fit(x[i][tr], y[i][tr],
+                      batch_size=64, epochs=50, verbose=0)
 
-# w_save = model.get_weights()
+            loss, accuracy = model.evaluate(x[i][val], y[i][val], verbose=0)
+            acc += accuracy
 
-model.summary()
+        acc /= 10.0
+        avgacc += acc
 
-avgacc = [0 for i in range(n_subs)]
+        print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2, acc, splits))
 
-for i in range(n_subs):
-    for train, val in kfold_split(xtr[i].shape[0], splits):
-        # reset to initial weights
-        # model.set_weights(w_save)
-        # fit with next kfold data
-        model.fit(xtr[i][train], ytr[i][train],
-                  batch_size=64, epochs=50, verbose=0)
+    avgacc /= n_subs
+    print("avg accuracy over all subjects {}".format(avgacc))
 
-        loss, accuracy = model.evaluate(xtr[i][val], ytr[i][val], verbose=0)
-        avgacc[i] += accuracy
 
-    avgacc[i] /= splits
-    print("sub: {}  acc: {}".format(i + 1 if i + 1 < 10 else i + 2, avgacc[i]))
-print("model: {}   avgacc: {}".format(j, sum(avgacc) / n_subs))
