@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH -t 20:55:00
+#SBATCH -t 10:00:00
 #SBATCH -J lstm_eeg
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
@@ -8,7 +8,7 @@
 # shold be lu or gpu
 #SBATCH -p gpu
 
-# how many gpus, 4 per node
+# how many gpus, 4 per node, using many seems to crash more often so stick with 1
 #SBATCH --gres=gpu:1
 
 #SBATCH --mem-per-cpu=3100

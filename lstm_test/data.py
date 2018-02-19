@@ -49,3 +49,24 @@ def load_single(idx=None, cut=True):
 
     return (x, y)
 
+
+def load_all(cut=True):
+    x = None
+    y = None
+
+    for sub in [i if i < 10 else i + 1 for i in range(1, 19)]:  # 19 is max
+        xn, yn = load_single_sub(sub, cut)
+        if x is None:
+            x = xn
+            y = yn
+        else:
+            x = np.concatenate((x, x), axis=0)
+            y = np.concatenate((y, y), axis=0)
+
+    print(x.shape, y.shape)
+    x = np.stack(x, axis=0)
+    print(x.shape)
+    s = np.arange(x.shape[0])
+    np.random.shuffle(s)
+
+    return (x[s], y[s])
