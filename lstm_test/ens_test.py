@@ -1,8 +1,4 @@
-import sys
-from datetime import datetime
-
 import numpy as np
-from scipy import io
 
 import tensorflow as tf
 
@@ -26,31 +22,23 @@ x, y = data.load_single(cut=True)
 
 splits = 5
 n_subs = len(x)
-n_models = 20
+n_models = 10
 
+
+avgacc = 0
 
 for i in range(n_subs):
     print("################ SUB {} ####################".format(i + 1 if i + 1 < 10 else i + 2))
     n = x[i].shape[0]
     acc = 0
     for tr, val in util.kfold(n, splits):
-        pred = np.zeros(y[i][val].shape)
-        for j in range(n_models):
-            first_layer_nodes = np.random.randint(10, 60)
-            second_layer_nodes = np.random.randint(5, 30)
-            dropout_prob = np.random.ranf() * 0.75
-            model = models.lstm_dense(x[0][0].shape,
-                                      first_layer_nodes,
-                                      second_layer_nodes,
-                                      dropout_prob)
 
-            print("first {}, second {}, dropout {}".format(first_layer_nodes,
-                                                           second_layer_nodes,
-                                                           dropout_prob))
-            w_save = model.get_weights()
-            avgacc = 0
-            # reset to initial weights
-            model.set_weights(w_save)
+        pred = np.zeros((len(val), 3))
+
+        for j in range(n_models):
+
+            model = models.lstm_dense(x[0][0].shape,
+                                      70, 20, 0.1)
 
             # fit with next kfold data
             model.fit(x[i][tr], y[i][tr],
@@ -59,14 +47,15 @@ for i in range(n_subs):
             pred += model.predict(x[i][val], verbose=0)
 
         pred /= n_models
-        acc = np.mean(
+        acc += np.mean(np.equal(np.argmax(pred, axis=-1),
+                                np.argmax(y[i][val], axis=-1)))
 
-        acc /= splits
-        avgacc += acc
+    acc /= splits
+    avgacc += acc
 
-        print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2, acc, splits))
+    print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2, avgacc, splits))
 
-    avgacc /= n_subs
-    print("avg accuracy over all subjects {}".format(avgacc))
+avgacc /= n_subs
+print("avg accuracy over all subjects {}".format(avgacc))
 
 
