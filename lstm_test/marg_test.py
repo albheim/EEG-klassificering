@@ -19,9 +19,19 @@ import util
 
 
 x, y = data.load_single(cut=True)
-x2 = data.load_marg()
+x2, _ = data.load_marg()
 
-print("x size bytes", x.nbytes)
+for i in range(len(x)):
+    s = np.arange(x[i].shape[0])
+    np.random.shuffle(s)
+    x[i] = x[i][s]
+    y[i] = y[i][s]
+    x2[i] = x2[i][s]
+
+print(x[0].shape, x2[0].shape)
+
+print("x size mb", x[0].nbytes * len(x) / 1000000)
+print("x2 size mb", x2[0].nbytes * len(x2) / 1000000)
 
 splits = 5
 n_subs = len(x)
@@ -50,7 +60,7 @@ for i in range(n_subs):
 
         model.fit(xtr, ytr,
                   batch_size=64, epochs=50, verbose=0)
-        
+
         model2.fit(xtr2, ytr,
                    batch_size=64, epochs=50, verbose=0)
 
@@ -64,7 +74,7 @@ for i in range(n_subs):
     acc /= splits
     avgacc += acc
 
-    print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2, avgacc, splits))
+    print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2, acc, splits))
 
 avgacc /= n_subs
 print("avg accuracy over all subjects {}".format(avgacc))
