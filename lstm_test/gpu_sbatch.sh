@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH -t 10:00:00
+#SBATCH -t 20:00:00
 #SBATCH -J lstm_eeg
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out

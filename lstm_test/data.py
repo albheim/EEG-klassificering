@@ -12,7 +12,7 @@ def load_single_sub(sub, cut):
     names = ["FA", "LM", "OB"]
     for i in range(3):
         name = "Subj{:02}_CleanData_study_{}".format(sub, names[i])
-        print("loading ", name)
+        print("loading: ", name)
         m = io.loadmat('{}/DATA/Visual/{}.mat'.format(snic_tmp, name))
         trials = m[name][0][0][2][0]
         if cut:
@@ -70,3 +70,35 @@ def load_all(cut=True):
     np.random.shuffle(s)
 
     return (x[s], y[s])
+
+
+def load_marg(cut=None):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    xn = None
+    yn = None
+    names = ["FA", "LM", "OB"]
+    for i in range(3):
+        name = "Subj{:02}_CleanData_study_{}".format(sub, names[i])
+        print("loading: ", name)
+        m = io.loadmat('{}/DATA/Visual/{}.mat'.format(snic_tmp, name))
+        trials = m[name][0][0][2][0]
+        if cut is not None:
+            for j in range(trials.shape[0]):
+                trials[j] = trials[j][:, cut[0]:cut[1]]
+        labels = np.zeros((trials.shape[0], 3))
+        labels[:, i] = 1
+        if xn is None:
+            xn = trials
+            yn = labels
+        else:
+            xn = np.concatenate((xn, trials), axis=0)
+            yn = np.concatenate((yn, labels), axis=0)
+
+    xn = np.stack(xn, axis=0)
+    n = xn.shape[0]
+    s = np.arange(n)
+    np.random.shuffle(s)
+
+    return (xn[s], yn[s])

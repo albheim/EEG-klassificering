@@ -19,6 +19,7 @@ import util
 
 
 x, y = data.load_single(cut=True)
+x2 = data.load_marg()
 
 print("x size bytes", x.nbytes)
 
@@ -35,23 +36,28 @@ for i in range(n_subs):
     for tr, val in util.kfold(n, splits):
 
         xtr = x[i][tr]
+        xtr2 = x2[i][tr]
         ytr = y[i][tr]
         xva = x[i][val]
+        xva2 = x2[i][val]
         yva = y[i][val]
 
-        pred = np.zeros((len(val), 3))
+        model = models.lstm_lstm(xtr[0].shape,
+                                 50, 10, 0.5)
 
-        for j in range(n_models):
+        model2 = models.lstm_lstm(xtr2[0].shape,
+                                  50, 10, 0.5)
 
-            model = models.lstm_dense(xtr[0].shape,
-                                      80, 30, 0.1)
+        model.fit(xtr, ytr,
+                  batch_size=64, epochs=50, verbose=0)
+        
+        model2.fit(xtr2, ytr,
+                   batch_size=64, epochs=50, verbose=0)
 
-            model.fit(xtr, ytr,
-                      batch_size=64, epochs=50, verbose=0)
+        pred = model.predict(xva, verbose=0)
+        pred += model2.predict(xva2, verbose=0)
 
-            pred += model.predict(xva, verbose=0)
-
-        pred /= n_models
+        pred /= 2
         acc += np.mean(np.equal(np.argmax(pred, axis=-1),
                                 np.argmax(yva, axis=-1)))
 

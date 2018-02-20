@@ -32,16 +32,14 @@ def get_random_setting():
     second_layer = np.random.choice([True, False])
     second_layer_type = np.random.choice([LSTM, Dense])
     second_layer_nodes = np.random.randint(10, 100)
-    second_layer_dropout = np.random.ranf() * 0.5 + 0.25
+    second_layer_dropout = np.random.ranf() * 0.75
 
     first_layer_nodes = np.random.randint(10, 100)
-    first_layer_dropout = np.random.ranf() * 0.5 + 0.25
-    if second_layer:
+    first_layer_dropout = np.random.ranf() * 0.75
+    if second_layer and second_layer_type == LSTM:
         first_layer_return_seq = np.random.choice([True, False])
     else:
         first_layer_return_seq = False
-
-    output = np.random.choice([Dense])
 
     epochs = np.random.randint(10, 100)
 
@@ -52,7 +50,6 @@ def get_random_setting():
             "second_layer_type": second_layer_type,
             "second_layer_nodes": second_layer_nodes,
             "second_layer_dropout": second_layer_dropout,
-            "output_type": output,
             "epochs": epochs}
 
 splits = 5
@@ -61,18 +58,27 @@ n_models = 20
 
 
 for _ in range(n_models):
-    first_layer_nodes = np.random.randint(10, 60)
-    second_layer_nodes = np.random.randint(5, 30)
-    dropout_prob = np.random.ranf() * 0.75
-    model = models.lstm_dense(x[0][0].shape,
-                              first_layer_nodes,
-                              second_layer_nodes,
-                              dropout_prob)
+    mset = get_random_setting()
+
+    model = Sequential()
+
+    model.add(LSTM(mset["first_layer_nodes"], 
+                   input_shape=x[0][0].shape, 
+                   return_sequences=mset["first_layer_return_seq"]))
+    model.add(Dropout(mset["first_layer_dropout"]))
+
+    if mset["second_layer"]:
+        model.add(mset["second_layer_type"](mset["second_layer_nodes"]))
+        model.add(Dropout(mset["second_layer_dropout"]))
+
+    model.add(Dense(3, activation='softmax'))
+
+    model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
+            
 
     model.summary()
-    print("first {}, second {}, dropout {}".format(first_layer_nodes,
-                                                   second_layer_nodes,
-                                                   dropout_prob))
+    print(mset)
+
     w_save = model.get_weights()
     avgacc = 0
     for i in range(n_subs):
@@ -84,7 +90,7 @@ for _ in range(n_models):
 
             # fit with next kfold data
             model.fit(x[i][tr], y[i][tr],
-                      batch_size=64, epochs=50, verbose=0)
+                      batch_size=64, epochs=mset["epochs"], verbose=0)
 
             loss, accuracy = model.evaluate(x[i][val], y[i][val], verbose=0)
             acc += accuracy
