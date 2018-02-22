@@ -4,7 +4,7 @@ import numpy as np
 from scipy import io
 
 def load_single_sub(sub, cut, shuffle=True, visual=True):
-    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
     xn = None
@@ -90,7 +90,7 @@ def load_all(cut=True, visual=True):
 
 
 def load_marg(cut=None, visual=True, shuffle=True):
-    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
     x = []
