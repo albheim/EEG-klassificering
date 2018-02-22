@@ -25,36 +25,46 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True)
+x, y = data.load_single(cut=True, visual=False)
 
 
 def get_random_setting():
-    second_layer = np.random.choice([True, False])
-    second_layer_type = np.random.choice([LSTM, Dense])
+    third_layer = np.random.choice([True, False])
+    third_layer_type = np.random.choice([LSTM, Dense])
+    third_layer_nodes = np.random.randint(10, 50)
+    third_layer_dropout = np.random.ranf() * 0.75
+
+
     second_layer_nodes = np.random.randint(10, 100)
     second_layer_dropout = np.random.ranf() * 0.75
-
-    first_layer_nodes = np.random.randint(10, 100)
-    first_layer_dropout = np.random.ranf() * 0.75
-    if second_layer and second_layer_type == LSTM:
-        first_layer_return_seq = np.random.choice([True, False])
+    if third_layer and third_layer_type == LSTM:
+        second_layer_return_seq = True
     else:
-        first_layer_return_seq = False
+        second_layer_return_seq = False
+
+    first_layer_nodes = np.random.randint(50, 500)
+    first_layer_dropout = np.random.ranf() * 0.75
+    first_layer_return_seq = True
 
     epochs = np.random.randint(10, 100)
 
     return {"first_layer_nodes": first_layer_nodes,
             "first_layer_dropout": first_layer_dropout,
             "first_layer_return_seq": first_layer_return_seq,
-            "second_layer": second_layer,
-            "second_layer_type": second_layer_type,
             "second_layer_nodes": second_layer_nodes,
             "second_layer_dropout": second_layer_dropout,
+            "second_layer_return_seq": second_layer_return_seq,
+            "third_layer": third_layer,
+            "third_layer_type": third_layer_type,
+            "third_layer_nodes": third_layer_nodes,
+            "third_layer_dropout": third_layer_dropout,
             "epochs": epochs}
 
 splits = 5
 n_subs = len(x)
-n_models = 20
+n_models = 70
+msets = []
+accs = []
 
 
 for _ in range(n_models):
@@ -67,9 +77,13 @@ for _ in range(n_models):
                    return_sequences=mset["first_layer_return_seq"]))
     model.add(Dropout(mset["first_layer_dropout"]))
 
-    if mset["second_layer"]:
-        model.add(mset["second_layer_type"](mset["second_layer_nodes"]))
-        model.add(Dropout(mset["second_layer_dropout"]))
+    model.add(LSTM(mset["second_layer_nodes"],
+                   return_sequences=mset["second_layer_return_seq"]))
+    model.add(Dropout(mset["second_layer_dropout"]))
+
+    if mset["third_layer"]:
+        model.add(mset["third_layer_type"](mset["third_layer_nodes"]))
+        model.add(Dropout(mset["third_layer_dropout"]))
 
     model.add(Dense(3, activation='softmax'))
 
@@ -102,5 +116,11 @@ for _ in range(n_models):
 
     avgacc /= n_subs
     print("avg accuracy over all subjects {}".format(avgacc))
+
+    msets.append(mset)
+    accs.append(avgacc)
+
+for acc, mset in sorted(zip(accs, msets)):
+    print(acc, mset, "\n")
 
 

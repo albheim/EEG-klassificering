@@ -18,7 +18,8 @@ import data
 import util
 
 
-x2, y = data.load_marg(shuffle=True)
+x, y = data.load_single(cut=True, shuffle=False)
+x2, _ = data.load_marg(shuffle=False)
 
 for i in range(len(x)):
     s = np.arange(x[i].shape[0])

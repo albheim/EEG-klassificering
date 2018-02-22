@@ -3,7 +3,7 @@ import sys
 import numpy as np
 from scipy import io
 
-def load_single_sub(sub, cut, shuffle=True):
+def load_single_sub(sub, cut, shuffle=True, visual=True):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
@@ -13,7 +13,12 @@ def load_single_sub(sub, cut, shuffle=True):
     for i in range(3):
         name = "Subj{:02}_CleanData_study_{}".format(sub, names[i])
         print("loading: ", name)
-        m = io.loadmat('{}/DATA/Visual/{}.mat'.format(snic_tmp, name))
+        print('{}/DATA/{}/{}.mat'.format(snic_tmp,
+                                         "Visual" if visual else "Verbal",
+                                         name))
+        m = io.loadmat('{}/DATA/{}/{}.mat'.format(snic_tmp,
+                                                  "Visual" if visual else "Verbal",
+                                                  name))
         trials = m[name][0][0][2][0]
         if cut:
             for j in range(trials.shape[0]):
@@ -36,28 +41,38 @@ def load_single_sub(sub, cut, shuffle=True):
     return (xn[s], yn[s])
 
 
-def load_single(idx=None, cut=True, shuffle=True):
+def load_single(idx=None, cut=True, shuffle=True, visual=True):
     x = []
     y = []
 
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(1, 19)]
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
     if idx is None:
-        for sub in [i if i < 10 else i + 1 for i in range(1, 19)]:  # 19 is max
+        for sub in subs:
             xn, yn = load_single_sub(sub, cut, shuffle)
             x.append(xn)
             y.append(yn)
     else:
-        x, y = load_single_sub(idx, cut, shuffle)
+        x, y = load_single_sub(idx, cut, shuffle, visual)
 
     print(x[0].shape)
     return (x, y)
 
 
-def load_all(cut=True):
+def load_all(cut=True, visual=True):
     x = None
     y = None
 
-    for sub in [i if i < 10 else i + 1 for i in range(1, 19)]:  # 19 is max
-        xn, yn = load_single_sub(sub, cut)
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(1, 19)]
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+    for sub in subs:  # 19 is max
+        xn, yn = load_single_sub(sub, cut, visual)
         if x is None:
             x = xn
             y = yn

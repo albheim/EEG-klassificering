@@ -20,11 +20,11 @@ import util
 
 x, y = data.load_single(cut=True)
 
-print("x size bytes", x.nbytes)
+print("x size bytes", x[0].nbytes * len(x))
 
-splits = 5
+splits = 4
 n_subs = len(x)
-n_models = 30
+n_models = 10
 
 
 avgacc = 0
@@ -43,8 +43,8 @@ for i in range(n_subs):
 
         for j in range(n_models):
 
-            model = models.lstm_dense(xtr[0].shape,
-                                      80, 30, 0.1)
+            model = models.lstm_lstm(xtr[0].shape,
+                                     60, 20, 0.1)
 
             model.fit(xtr, ytr,
                       batch_size=64, epochs=50, verbose=0)
