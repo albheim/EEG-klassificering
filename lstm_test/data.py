@@ -52,7 +52,7 @@ def load_single(idx=None, cut=True, shuffle=True, visual=True):
 
     if idx is None:
         for sub in subs:
-            xn, yn = load_single_sub(sub, cut, shuffle)
+            xn, yn = load_single_sub(sub, cut, shuffle, visual)
             x.append(xn)
             y.append(yn)
     else:
