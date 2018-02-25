@@ -16,6 +16,7 @@ print(device_lib.list_local_devices())
 import models
 import data
 import util
+import gc
 
 
 x, y = data.load_single(cut=True)
@@ -24,7 +25,7 @@ print("x size bytes", x[0].nbytes * len(x))
 
 splits = 4
 n_subs = len(x)
-n_models = 10
+n_models = 30
 
 
 avgacc = 0
@@ -43,13 +44,19 @@ for i in range(n_subs):
 
         for j in range(n_models):
 
-            model = models.lstm_lstm(xtr[0].shape,
-                                     60, 20, 0.1)
+            model = Sequential()
+            model.add(LSTM(150, input_shape=xtr[0].shape, return_sequences=True))
+            model.add(LSTM(50))
+            model.add(Dense(3, activation='softmax'))
+
+            model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
 
             model.fit(xtr, ytr,
                       batch_size=64, epochs=50, verbose=0)
 
             pred += model.predict(xva, verbose=0)
+
+            gc.collect()
 
         pred /= n_models
         acc += np.mean(np.equal(np.argmax(pred, axis=-1),

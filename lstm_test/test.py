@@ -25,7 +25,7 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True, visual=False)
+x, y = data.load_marg(cut=None, visual=True)
 
 
 def get_random_setting():

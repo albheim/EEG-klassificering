@@ -20,13 +20,6 @@ import util
 
 x2, y = data.load_marg(shuffle=True)
 
-for i in range(len(x)):
-    s = np.arange(x[i].shape[0])
-    np.random.shuffle(s)
-    x[i] = x[i][s]
-    y[i] = y[i][s]
-    x2[i] = x2[i][s]
-
 print(x[0].shape, x2[0].shape)
 
 print("x size mb", x[0].nbytes * len(x) / 1000000)
