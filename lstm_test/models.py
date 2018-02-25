@@ -24,7 +24,7 @@ def lstm_dense(input_shape, first_size=32, second_size=16, dropout_p=0.5):
     model = Sequential()
     model.add(LSTM(first_size, input_shape=input_shape))
     model.add(Dropout(dropout_p))
-    model.add(Dense(second_size))
+    model.add(Dense(second_size), activation='tanh')
     model.add(Dense(3, activation='softmax'))
 
     model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])

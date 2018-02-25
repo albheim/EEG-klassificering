@@ -3,7 +3,7 @@ import sys
 import numpy as np
 from scipy import io
 
-def load_single_sub(sub, cut, shuffle=True, visual=True):
+def load_single_sub(sub, cut, shuffle=True, visual=True, transpose=False):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
@@ -13,9 +13,6 @@ def load_single_sub(sub, cut, shuffle=True, visual=True):
     for i in range(3):
         name = "Subj{:02}_CleanData_study_{}".format(sub, names[i])
         print("loading: ", name)
-        print('{}/DATA/{}/{}.mat'.format(snic_tmp,
-                                         "Visual" if visual else "Verbal",
-                                         name))
         m = io.loadmat('{}/DATA/{}/{}.mat'.format(snic_tmp,
                                                   "Visual" if visual else "Verbal",
                                                   name))
@@ -23,6 +20,8 @@ def load_single_sub(sub, cut, shuffle=True, visual=True):
         if cut:
             for j in range(trials.shape[0]):
                 trials[j] = trials[j][:, 768:1536]
+                if transpose:
+                    trials[j] = trials[j].T
         labels = np.zeros((trials.shape[0], 3))
         labels[:, i] = 1
         if xn is None:
@@ -41,7 +40,7 @@ def load_single_sub(sub, cut, shuffle=True, visual=True):
     return (xn[s], yn[s])
 
 
-def load_single(idx=None, cut=True, shuffle=True, visual=True):
+def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False):
     x = []
     y = []
 
@@ -52,11 +51,11 @@ def load_single(idx=None, cut=True, shuffle=True, visual=True):
 
     if idx is None:
         for sub in subs:
-            xn, yn = load_single_sub(sub, cut, shuffle, visual)
+            xn, yn = load_single_sub(sub, cut, shuffle, visual, transpose)
             x.append(xn)
             y.append(yn)
     else:
-        x, y = load_single_sub(idx, cut, shuffle, visual)
+        x, y = load_single_sub(idx, cut, shuffle, visual, transpose)
 
     print(x[0].shape)
     return (x, y)
@@ -130,3 +129,7 @@ def load_marg(cut=None, visual=True, shuffle=True):
 
     print(x[0].shape)
     return (x, y)
+
+
+def modify(data, noice=True, displacement=True, cut=[]):
+    pass
