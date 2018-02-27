@@ -18,12 +18,11 @@ import data
 import util
 
 
-x2, y = data.load_marg(shuffle=True)
+x, y = data.load_marg(shuffle=True)
 
-print(x[0].shape, x2[0].shape)
+print(x[0].shape)
 
 print("x size mb", x[0].nbytes * len(x) / 1000000)
-print("x2 size mb", x2[0].nbytes * len(x2) / 1000000)
 
 splits = 5
 n_subs = len(x)
@@ -37,10 +36,8 @@ for i in range(n_subs):
     for tr, val in util.kfold(n, splits):
 
         xtr = x[i][tr]
-        xtr2 = x2[i][tr]
         ytr = y[i][tr]
         xva = x[i][val]
-        xva2 = x2[i][val]
         yva = y[i][val]
 
         model = models.lstm_lstm(xtr[0].shape,
@@ -49,19 +46,10 @@ for i in range(n_subs):
         model.fit(xtr, ytr,
                   batch_size=64, epochs=50, verbose=0)
 
-        pred = model.predict(xva, verbose=0)
+        loss, accuracy = model.evaluate(xva, yva,
+                                        verbose=0)
+        acc += accuracy
 
-        model = models.lstm_lstm(xtr2[0].shape,
-                                 50, 10, 0.4)
-
-        model.fit(xtr2, ytr,
-                  batch_size=64, epochs=50, verbose=0)
-
-        pred += model.predict(xva2, verbose=0)
-
-        pred /= 2
-        acc += np.mean(np.equal(np.argmax(pred, axis=-1),
-                                np.argmax(yva, axis=-1)))
 
     acc /= splits
     avgacc += acc
