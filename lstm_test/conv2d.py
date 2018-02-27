@@ -31,30 +31,50 @@ print(x[0][0].shape)
 
 splits = 5
 n_subs = len(x)
-n_models = 2
+n_models = 100
 msets = []
 accs = []
 
+def gen_model():
+    return {"l1_nodes": np.random.randint(10, 40),
+            "l1_filter": np.random.randint(5, 30),
+            "l1_dropout": np.random.ranf() * 0.75,
+            "l2_nodes": np.random.randint(5, 30),
+            "l2_filter": np.random.randint(4, 20),
+            "l2_dropout": np.random.ranf() * 0.75,
+            "l3_nodes": np.random.randint(1, 15),
+            "l3_filter": np.random.randint(2, 15),
+            "l3_dropout": np.random.ranf() * 0.75,
+            "dense_nodes": np.random.randint(5, 50)}
 
 for _ in range(n_models):
 
+    mset = gen_model()
+    msets.append(mset)
+
     model = Sequential()
 
-    model.add(Conv2D(32, (1, 10), input_shape=x[0][0].shape, activation='relu'))
+    model.add(Conv2D(mset["l1_nodes"], (1, mset["l1_filter"]),
+                     input_shape=x[0][0].shape, activation='relu'))
     model.add(MaxPooling2D((1, 3)))
-    model.add(Dropout(0.2))
-    model.add(Conv2D(10, (1, 5), activation='relu'))
+    model.add(Dropout(mset["l1_dropout"]))
+
+    model.add(Conv2D(mset["l2_nodes"], (1, mset["l2_filter"]), activation='relu'))
     model.add(MaxPooling2D((1, 3)))
-    model.add(Dropout(0.2))
-    model.add(Conv2D(5, (31, 5), activation='relu'))
+    model.add(Dropout(mset["l2_dropout"]))
+
+    model.add(Conv2D(mset["l3_nodes"], (31, mset["l3_filter"]), activation='relu'))
     model.add(MaxPooling2D((1, 2)))
+    model.add(Dropout(mset["l3_dropout"]))
+
     model.add(Flatten())
-    model.add(Dense(15, activation='tanh'))
+    model.add(Dense(mset["dense_nodes"], activation='tanh'))
     model.add(Dense(3, activation='softmax'))
 
     model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
 
     model.summary()
+    print(mset)
 
     w_save = model.get_weights()
     avgacc = 0
@@ -75,8 +95,12 @@ for _ in range(n_models):
 
         acc /= splits
         avgacc += acc
+        accs.append(avgacc)
 
         print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2, acc, splits))
 
     avgacc /= n_subs
     print("avg accuracy over all subjects {}".format(avgacc))
+
+for a, m in sorted(zip(accs, msets)):
+    print("{}, {}".format(a, m))

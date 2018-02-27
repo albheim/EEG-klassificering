@@ -61,7 +61,7 @@ for j in range(n_models):
     model.add(MaxPooling1D(2))
     model.add(Dropout(mset["l2_dropout"]))
 
-    model.add(Conv1D(mset["l3_nodes"], mset["l2_filter"], activation='relu'))
+    model.add(Conv1D(mset["l3_nodes"], mset["l3_filter"], activation='relu'))
     model.add(MaxPooling1D(2))
     model.add(Dropout(mset["l3_dropout"]))
 
