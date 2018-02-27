@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH -t 20:55:00
+#SBATCH -t 60:55:00
 #SBATCH -J lstm_eeg
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
@@ -17,7 +17,7 @@ echo $DATA_DIR
 echo "script"
 cat $0
 
-PY_FILE="test.py"
+PY_FILE="conv1d.py"
 echo "py file"
 cat $PY_FILE
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 60:00:00
-#SBATCH -J margonl
+#SBATCH -J c2d_1
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -11,6 +11,8 @@
 # how many gpus, 4 per node, using many seems to crash more often so stick with 1
 #SBATCH --gres=gpu:1
 
+# use 5 cores per GPU
+#SBATCH -n 5
 #SBATCH --mem-per-cpu=3100
 
 DATA_DIR="$(cat ../data_location.txt)"
@@ -20,7 +22,7 @@ echo $DATA_DIR
 echo "script"
 cat $0
 
-PY_FILE="test.py"
+PY_FILE="conv2d.py"
 echo "py file"
 cat $PY_FILE
 

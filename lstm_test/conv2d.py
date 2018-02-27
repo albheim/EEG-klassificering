@@ -31,7 +31,7 @@ print(x[0][0].shape)
 
 splits = 5
 n_subs = len(x)
-n_models = 70
+n_models = 2
 msets = []
 accs = []
 
