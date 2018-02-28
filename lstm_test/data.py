@@ -131,5 +131,30 @@ def load_marg(cut=None, visual=True, shuffle=True):
     return (x, y)
 
 
-def modify(data, noice=True, displacement=True, cut=[]):
-    pass
+def cut(data, cut=[768, 1536]):
+    for sub in range(len(data)):
+        data[sub] = data[sub][:, :, cut[0]:cut[1]]
+
+
+def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
+    mdata = [None for i in range(len(x))]
+    my = [None for i in range(len(x))]
+    for sub in range(len(mdata)):
+        s = x[sub].shape[0]
+        my[sub] = np.zeros((s * n, 3))
+        for j in range(0, s * n, s):
+            my[sub][j:j + s] = y[sub]
+        mdata[sub] = np.zeros((s * n, x[sub].shape[1], cut[1] - cut[0]))
+        mdata[sub][:s, :, :] = x[sub][:, :, cut[0]:cut[1]]
+        for j in range(s, s * n, s):
+            for i in range(len(x[sub])):
+                if displacement > 0:
+                    d = np.random.randint(-displacement, displacement + 1)
+                    mdata[sub][j:j + s, :, :] = x[sub][:, :, cut[0] + d:cut[1] + d]
+
+                if nmult != 0:
+                    for k in range(mdata[sub][i].shape[0]):
+                        mdata[sub][j + i, k] += nmult * np.std(mdata[sub][i, k]) * np.random.ranf(mdata[sub][i, k].shape)
+
+    return mdata, my
+
