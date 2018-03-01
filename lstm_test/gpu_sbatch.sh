@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 60:00:00
-#SBATCH -J c2d_ra
+#SBATCH -J c1d_ra
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -22,7 +22,7 @@ echo $DATA_DIR
 echo "script"
 cat $0
 
-PY_FILE="conv2d.py"
+PY_FILE="conv1d.py"
 echo "py file"
 cat $PY_FILE
 

@@ -29,40 +29,45 @@ print(x[0].shape)
 splits = 5
 n_subs = len(x)
 n_models = 100
-msets = [None for j in range(n_models)]
-accs = [0 for j in range(n_models)]
+msets = []
+accs = []
 
 def gen_model():
     return {"l1_nodes": np.random.randint(10, 40),
             "l1_filter": np.random.randint(5, 30),
             "l1_dropout": np.random.ranf() * 0.75,
+            "l1_maxpool": np.random.randint(1, 4),
             "l2_nodes": np.random.randint(5, 30),
             "l2_filter": np.random.randint(4, 20),
             "l2_dropout": np.random.ranf() * 0.75,
+            "l2_maxpool": np.random.randint(1, 3),
             "l3_nodes": np.random.randint(1, 15),
             "l3_filter": np.random.randint(2, 15),
             "l3_dropout": np.random.ranf() * 0.75,
+            "l3_maxpool": np.random.randint(1, 3),
             "dense_nodes": np.random.randint(5, 50)}
 
 
 for j in range(n_models):
 
     mset = gen_model()
-    msets[j] = mset
+    msets.append(mset)
 
     model = Sequential()
 
-    model.add(Conv1D(mset["l1_nodes"], mset["l1_filter"],
+    model.add(Conv1D(mset["l1_nodes"], mset["l1_filter"], padding='causal',
                      input_shape=x[0][0].shape, activation='relu'))
-    model.add(MaxPooling1D(2))
+    model.add(MaxPooling1D(mset["l1_maxpool"]))
     model.add(Dropout(mset["l1_dropout"]))
 
-    model.add(Conv1D(mset["l2_nodes"], mset["l2_filter"], activation='relu'))
-    model.add(MaxPooling1D(2))
+    model.add(Conv1D(mset["l2_nodes"], mset["l2_filter"],
+                     padding='causal', activation='relu'))
+    model.add(MaxPooling1D(mset["l2_maxpool"]))
     model.add(Dropout(mset["l2_dropout"]))
 
-    model.add(Conv1D(mset["l3_nodes"], mset["l3_filter"], activation='relu'))
-    model.add(MaxPooling1D(2))
+    model.add(Conv1D(mset["l3_nodes"], mset["l3_filter"],
+                     padding='causal', activation='relu'))
+    model.add(MaxPooling1D(mset["l3_maxpool"]))
     model.add(Dropout(mset["l3_dropout"]))
 
     model.add(Flatten())
@@ -85,7 +90,7 @@ for j in range(n_models):
 
             # fit with next kfold data
             model.fit(x[i][tr], y[i][tr],
-                      batch_size=64, epochs=50, verbose=0)
+                      batch_size=64, epochs=90, verbose=0)
 
             loss, accuracy = model.evaluate(x[i][val], y[i][val],
                                             verbose=0)
@@ -97,7 +102,7 @@ for j in range(n_models):
         print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2, acc, splits))
 
     avgacc /= n_subs
-    accs[j] = avgacc
+    accs.append(avgacc)
     print("avg accuracy over all subjects {}".format(avgacc))
 
 for a, m in sorted(zip(accs, msets)):
