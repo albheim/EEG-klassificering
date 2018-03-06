@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 60:00:00
-#SBATCH -J c1d_r0.5
+#SBATCH -J c1d_ds_n
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -22,7 +22,7 @@ echo $DATA_DIR
 echo "script"
 cat $0
 
-PY_FILE="conv1d.py"
+PY_FILE="down_noise_conv1d.py"
 echo "py file"
 cat $PY_FILE
 

@@ -11,6 +11,7 @@ from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalizatio
 from keras.layers import TimeDistributed
 from keras.layers import SimpleRNN, RNN, LSTM, GRU
 from keras.layers import Conv1D, MaxPooling1D, Flatten
+from keras.layers import ELU
 
 from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
@@ -48,21 +49,26 @@ def gen_model():
 for j in range(n_models):
 
     mset = gen_model()
-    msets[j] = mset
+    msets[j] = " " #mset
 
     m_in = Input(shape=x[0][0].shape)
-    # m_norm = BatchNormalization(
     m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_in)
 
-    m_t = Conv1D(30, 10, activation='elu', padding='causal')(m_noise)
+    m_t = Conv1D(30, 10, padding='causal')(m_noise)
+    m_t = BatchNormalization(0)(m_t)
+    m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
-    m_t = Conv1D(30, 5, activation='elu', padding='causal')(m_t)
+    m_t = Conv1D(30, 5, padding='causal')(m_t)
+    m_t = BatchNormalization(0)(m_t)
+    m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
-    m_t = Conv1D(30, 5, activation='elu', padding='causal')(m_t)
+    m_t = Conv1D(30, 5, padding='causal')(m_t)
+    m_t = BatchNormalization(0)(m_t)
+    m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
