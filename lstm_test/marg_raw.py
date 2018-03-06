@@ -1,8 +1,9 @@
 import numpy as np
 
 import tensorflow as tf
+import keras
 
-from keras.models import Sequential
+from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Input
 from keras.layers import TimeDistributed
 from keras.layers import SimpleRNN, RNN, LSTM, GRU
@@ -52,25 +53,55 @@ for _ in range(10):
             xva2 = x2[i][val]
             yva = y[i][val]
 
-            model = models.lstm_lstm(xtr[0].shape,
-                                     80, 25, 0.4)
+            raw_in = Input(shape=xtr[0].shape)
+            raw_t = LSTM(32, return_sequences=True)(raw_in)
+            raw_t = LSTM(8)(raw_t)
+            raw_out = Dense(30, activation="tanh")(raw_t)
 
-            model.fit(xtr, ytr,
-                      batch_size=64, epochs=50, verbose=0)
+            marg_in = Input(shape=xtr2[0].shape)
+            marg_t = LSTM(32, return_sequences=True)(marg_in)
+            marg_t = LSTM(8)(marg_t)
+            marg_out = Dense(15, activation="tanh")(marg_t)
 
-            pred = model.predict(xva, verbose=0)
+            merge = keras.layers.concatenate([raw_out, marg_out])
+            merge_t = Dense(50, activation="tanh")(merge)
+            out = Dense(3, activation="softmax")(merge_t)
 
-            model = models.lstm_lstm(xtr2[0].shape,
-                                     60, 15, 0.4)
+            model = Model(inputs=[raw_in, marg_in], outputs=out)
 
-            model.fit(xtr2, ytr,
-                      batch_size=64, epochs=50, verbose=0)
+            model.compile(optimizer="rmsprop",
+                          loss="categorical_crossentropy",
+                          metrics=["accuracy"])
 
-            pred += model.predict(xva2, verbose=0)
+            # model.summary()
 
-            pred /= 2
-            acc += np.mean(np.equal(np.argmax(pred, axis=-1),
-                                    np.argmax(yva, axis=-1)))
+            model.fit([xtr, xtr2], ytr,
+                      batch_size=32, epochs=50, verbose=0)
+
+            loss, accuracy = model.evaluate([xva, xva2], yva,
+                                            batch_size=32, verbose=0)
+            acc += accuracy
+
+
+            # model = models.lstm_lstm(xtr[0].shape,
+            #                          80, 25, 0.4)
+
+            # model.fit(xtr, ytr,
+            #           batch_size=64, epochs=50, verbose=0)
+
+            # pred = model.predict(xva, verbose=0)
+
+            # model = models.lstm_lstm(xtr2[0].shape,
+            #                          60, 15, 0.4)
+
+            # model.fit(xtr2, ytr,
+            #           batch_size=64, epochs=50, verbose=0)
+
+            # pred += model.predict(xva2, verbose=0)
+
+            # pred /= 2
+            # acc += np.mean(np.equal(np.argmax(pred, axis=-1),
+            #                         np.argmax(yva, axis=-1)))
 
         acc /= splits
         avgacc += acc
