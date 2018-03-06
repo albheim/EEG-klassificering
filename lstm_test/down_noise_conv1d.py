@@ -55,19 +55,19 @@ for j in range(n_models):
     m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_in)
 
     m_t = Conv1D(30, 10, padding='causal')(m_noise)
-    m_t = BatchNormalization(0)(m_t)
+    m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
     m_t = Conv1D(30, 5, padding='causal')(m_t)
-    m_t = BatchNormalization(0)(m_t)
+    m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
     m_t = Conv1D(30, 5, padding='causal')(m_t)
-    m_t = BatchNormalization(0)(m_t)
+    m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
