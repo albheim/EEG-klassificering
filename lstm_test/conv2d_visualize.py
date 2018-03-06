@@ -57,6 +57,7 @@ print(w0[0].shape)
 
 w_save = model.get_weights()
 avgacc = 0
+wlist = np.zeros((19,), dtype=np.object)
 for i in range(n_subs):
     n = x[i].shape[0]
 
@@ -72,13 +73,17 @@ for i in range(n_subs):
     loss, acc = model.evaluate(x[i][val], y[i][val],
                                verbose=0)
 
-    w0 = model.layers[0].get_weights()
-    print(w0)
-    print(w0[0])
-
     avgacc += acc
 
     print("subject {}, accuracy {}".format(i + 1 if i + 1 < 10 else i + 2, acc))
+
+    w0 = model.layers[0].get_weights()
+    print(len(w0))
+    print(w0[0].shape)
+    print(w0[0][0].shape)
+    wlist[i] = w0[0][0]
+
+io.savemat('out.mat', mdict={'out': wlist})
 
 avgacc /= n_subs
 print("avg accuracy over all subjects {}".format(avgacc))

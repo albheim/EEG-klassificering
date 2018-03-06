@@ -3,7 +3,7 @@ import sys
 import numpy as np
 from scipy import io
 
-def load_single_sub(sub, cut, shuffle=True, visual=True, transpose=False):
+def load_single_sub(sub, cut, study=True, shuffle=True, visual=True, transpose=False):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
@@ -11,7 +11,9 @@ def load_single_sub(sub, cut, shuffle=True, visual=True, transpose=False):
     yn = None
     names = ["FA", "LM", "OB"]
     for i in range(3):
-        name = "Subj{:02}_CleanData_study_{}".format(sub, names[i])
+        name = "Subj{:02}_CleanData_{}_{}".format(sub,
+                                                  'study' if study else 'test',
+                                                  names[i])
         print("loading: ", name)
         m = io.loadmat('{}/DATA/{}/{}.mat'.format(snic_tmp,
                                                   "Visual" if visual else "Verbal",
@@ -40,7 +42,8 @@ def load_single_sub(sub, cut, shuffle=True, visual=True, transpose=False):
     return (xn[s], yn[s])
 
 
-def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False):
+def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False,
+                study=True):
     x = []
     y = []
 
@@ -51,11 +54,11 @@ def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False):
 
     if idx is None:
         for sub in subs:
-            xn, yn = load_single_sub(sub, cut, shuffle, visual, transpose)
+            xn, yn = load_single_sub(sub, cut, shuffle, visual, transpose, study)
             x.append(xn)
             y.append(yn)
     else:
-        x, y = load_single_sub(idx, cut, shuffle, visual, transpose)
+        x, y = load_single_sub(idx, cut, shuffle, visual, transpose, study)
 
     print(x[0].shape)
     return (x, y)
@@ -158,3 +161,42 @@ def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
 
     return mdata, my
 
+
+def load_spect_downsample(visual=True, shuffle=True, ds=8):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    x = []
+    y = []
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(2, 19)] # change to 1
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+    for sub in subs:
+        xn = None
+        yn = None
+        for i in range(3):
+            name = "Subj{:02}_{}_spec{}".format(sub, "Visual" if visual else "Verbal", ds)
+            print("loading: ", name)
+            m = io.loadmat('{}/DATA/Modified/spect_downsample/{}.mat'.format(snic_tmp, name))
+
+            trials = m['data'][0][0][i][:, 0]
+            labels = np.zeros((trials.shape[0], 3))
+            labels[:, i] = 1
+            if xn is None:
+                xn = trials
+                yn = labels
+            else:
+                xn = np.concatenate((xn, trials), axis=0)
+                yn = np.concatenate((yn, labels), axis=0)
+
+        xn = np.stack(xn, axis=0)
+        n = xn.shape[0]
+        s = np.arange(n)
+        if shuffle:
+            np.random.shuffle(s)
+        x.append(xn[s])
+        y.append(yn[s])
+
+    print(x[0].shape)
+    return (x, y)
