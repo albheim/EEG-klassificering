@@ -131,7 +131,11 @@ def load_marg(cut=None, visual=True, shuffle=True):
     return (x, y)
 
 
-def cut(data, cut=[768, 1536]):
+def cut(data, cut=[768, 1536], tcut = None):
+    if tcut is not None:
+        cut[0] = int(512 * tcut[0] + 768)
+        cut[1] = int(512 * tcut[1] + 768)
+    print(cut)
     for sub in range(len(data)):
         data[sub] = data[sub][:, :, cut[0]:cut[1]]
 

@@ -98,12 +98,12 @@ for _ in range(n_models):
 
         acc /= splits
         avgacc += acc
-        accs.append(avgacc)
 
         print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2, acc, splits))
 
     avgacc /= n_subs
+    accs.append(avgacc)
     print("avg accuracy over all subjects {}".format(avgacc))
 
 for a, m in sorted(zip(accs, msets)):
-    print("{}, {}".format(a, m))
+    print("{}\n{}\n".format(a, m))

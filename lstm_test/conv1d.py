@@ -23,8 +23,11 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True, visual=True, transpose=True)
-print(x[0].shape)
+x, y = data.load_single(cut=False, visual=True, transpose=True)
+print("before cut", x[0].shape)
+data.cut(x, tcut=(0, 0.5))
+print("after cut", x[0].shape)
+
 
 splits = 5
 n_subs = len(x)
@@ -33,19 +36,19 @@ msets = []
 accs = []
 
 def gen_model():
-    return {"l1_nodes": np.random.randint(10, 40),
-            "l1_filter": np.random.randint(5, 30),
-            "l1_dropout": np.random.ranf() * 0.75,
-            "l1_maxpool": np.random.randint(1, 4),
-            "l2_nodes": np.random.randint(5, 30),
-            "l2_filter": np.random.randint(4, 20),
-            "l2_dropout": np.random.ranf() * 0.75,
+    return {"l1_nodes": np.random.randint(20, 30),
+            "l1_filter": np.random.randint(10, 20),
+            "l1_dropout": np.random.ranf() * 0.5,
+            "l1_maxpool": np.random.randint(2, 4),
+            "l2_nodes": np.random.randint(10, 25),
+            "l2_filter": np.random.randint(5, 15),
+            "l2_dropout": np.random.ranf() * 0.5,
             "l2_maxpool": np.random.randint(1, 3),
             "l3_nodes": np.random.randint(1, 15),
             "l3_filter": np.random.randint(2, 15),
-            "l3_dropout": np.random.ranf() * 0.75,
+            "l3_dropout": np.random.ranf() * 0.5,
             "l3_maxpool": np.random.randint(1, 3),
-            "dense_nodes": np.random.randint(5, 50)}
+            "dense_nodes": np.random.randint(20, 50)}
 
 
 for j in range(n_models):
