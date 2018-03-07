@@ -8,7 +8,7 @@ import tensorflow as tf
 
 from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
-from keras.layers import TimeDistributed
+from keras.layers import TimeDistributed, Lambda
 from keras.layers import SimpleRNN, RNN, LSTM, GRU
 from keras.layers import Conv1D, MaxPooling1D, Flatten
 from keras.layers import ELU
@@ -19,7 +19,6 @@ from keras import backend as K
 from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
 
-import models
 import data
 import util
 
@@ -46,13 +45,19 @@ def gen_model():
             "dense_nodes": 30} #np.random.randint(5, 50)}
 
 
+def offset_slice(inputs):
+    w = 768
+    r = np.random.randint(inputs.shape[1] - w + 1)
+    return inputs[:, r:r + w, :]
+
 for j in range(n_models):
 
     mset = gen_model()
     msets[j] = " " #mset
 
     m_in = Input(shape=x[0][0].shape)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_in)
+    m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off)
 
     m_t = Conv1D(30, 10, padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
@@ -107,17 +112,15 @@ for j in range(n_models):
         acc /= splits
         avgacc += acc
 
-        print("subject {}, avg accuracy {} over {} splits with ds {}".format(i + 1 if i + 1 < 10 else i + 2,
-                                                                             acc, splits, 2**int(j / 20)))
-
-        if j % 20 == 19:
-            x[i] = x[i][:, :, ::2]
+        print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2,
+                                                                  acc, splits))
 
     avgacc /= n_subs
     accs[j] = avgacc
-    print("avg accuracy over all subjects {} for downsampling {}".format(avgacc, 2**int(j / 20)))
+    print("avg accuracy over all subjects {}".format(avgacc))
 
 
 for a, (j, m) in sorted(zip(accs, enumerate(msets))):
-    print("acc {}, downsample {}\n{}\n".format(a, 2**int(j / 20), m))
+    print("acc {}\n{}\n".format(a, m))
 
+print("avg over all trials and subjects {}".format(sum(accs) / len(accs)))
