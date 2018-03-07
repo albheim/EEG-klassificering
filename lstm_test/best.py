@@ -19,10 +19,8 @@ from keras import backend as K
 from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
 
-import models
 import data
 import util
-
 
 
 x, y = data.load_single(cut=True, visual=True, transpose=True)
@@ -46,11 +44,11 @@ def gen_model():
             "l3_dropout": 0.001, #np.random.ranf() * 0.75,
             "dense_nodes": 30} #np.random.randint(5, 50)}
 
+
 def offset_slice(inputs):
-    w = 730
+    w = 768
     r = np.random.randint(inputs.shape[1] - w + 1)
     return inputs[:, r:r + w, :]
-
 
 for j in range(n_models):
 
@@ -105,8 +103,7 @@ for j in range(n_models):
 
             # fit with next kfold data
             model.fit(x[i][tr], y[i][tr],
-                      validation_data=(x[i][val], y[i][val]),
-                      batch_size=64, epochs=50, verbose=1)
+                      batch_size=64, epochs=50, verbose=0)
 
             loss, accuracy = model.evaluate(x[i][val], y[i][val],
                                             verbose=0)
@@ -115,17 +112,15 @@ for j in range(n_models):
         acc /= splits
         avgacc += acc
 
-        print("subject {}, avg accuracy {} over {} splits with ds {}".format(i + 1 if i + 1 < 10 else i + 2,
-                                                                             acc, splits, 2**int(j / 20)))
-
-        if j % 20 == 19:
-            x[i] = x[i][:, :, ::2]
+        print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2,
+                                                                  acc, splits))
 
     avgacc /= n_subs
     accs[j] = avgacc
-    print("avg accuracy over all subjects {} for downsampling {}".format(avgacc, 2**int(j / 20)))
+    print("avg accuracy over all subjects {}".format(avgacc))
 
 
 for a, (j, m) in sorted(zip(accs, enumerate(msets))):
-    print("acc {}, downsample {}\n{}\n".format(a, 2**int(j / 20), m))
+    print("acc {}\n{}\n".format(a, m))
 
+print("avg over all trials and subjects {}".format(sum(accs) / len(accs)))
