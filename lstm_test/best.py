@@ -23,7 +23,7 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True, visual=True, transpose=True)
+x, y = data.load_single(cut=True, visual=False, transpose=True)
 print(x[0].shape)
 
 splits = 10
