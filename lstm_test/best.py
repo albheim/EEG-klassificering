@@ -23,7 +23,8 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True, visual=True, transpose=True)
+x, y = data.load_single(cut=True, visual=False, transpose=True)
+xt, yt = data.load_single(cut=True, visual=False, study=False, transpose=True)
 print(x[0].shape)
 
 splits = 10
@@ -31,6 +32,8 @@ n_subs = len(x)
 n_models = 100
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
+accs2 = [0 for j in range(n_models)]
+
 
 def gen_model():
     return {"l1_nodes": 30, #np.random.randint(10, 40),
@@ -46,7 +49,7 @@ def gen_model():
 
 
 def offset_slice(inputs):
-    w = 768
+    w = 730
     r = np.random.randint(inputs.shape[1] - w + 1)
     return inputs[:, r:r + w, :]
 
@@ -56,8 +59,8 @@ for j in range(n_models):
     msets[j] = " " #mset
 
     m_in = Input(shape=x[0][0].shape)
-    m_off = Lambda(offset_slice)(m_in)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off)
+    #m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_in)
 
     m_t = Conv1D(30, 10, padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
@@ -94,9 +97,11 @@ for j in range(n_models):
 
     w_save = model.get_weights()
     avgacc = 0
+    avgacc2 = 0
     for i in range(n_subs):
         n = x[i].shape[0]
         acc = 0
+        acc2 = 0
         for tr, val in util.kfold(n, splits):
             # reset to initial weights
             model.set_weights(w_save)
@@ -107,20 +112,26 @@ for j in range(n_models):
 
             loss, accuracy = model.evaluate(x[i][val], y[i][val],
                                             verbose=0)
+            l2, a2 = model.evaluate(xt[i], yt[i], verbose=0)
+
             acc += accuracy
+            acc2 += a2
 
         acc /= splits
+        acc2 /= splits
         avgacc += acc
+        avgacc2 += acc2
 
-        print("subject {}, avg accuracy {} over {} splits".format(i + 1 if i + 1 < 10 else i + 2,
-                                                                  acc, splits))
+        print("subject {}, avg accuracy {}/{} over {} splits".format(i + 1 if i + 1 < 10 else i + 2,
+                                                                     acc, acc2, splits))
 
     avgacc /= n_subs
     accs[j] = avgacc
-    print("avg accuracy over all subjects {}".format(avgacc))
+    accs2[j] = avgacc2
+    print("avg accuracy over all subjects {}/{}".format(avgacc, avgacc2))
 
 
-for a, (j, m) in sorted(zip(accs, enumerate(msets))):
-    print("acc {}\n{}\n".format(a, m))
+for a, a2 in sorted(zip(accs, accs2)):
+    print("acc {}/{}\n".format(a, a2))
 
-print("avg over all trials and subjects {}".format(sum(accs) / len(accs)))
+print("avg over all trials and subjects {}/{}".format(sum(accs) / len(accs), sum(accs2) / len(accs2)))

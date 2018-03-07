@@ -3,7 +3,7 @@ import sys
 import numpy as np
 from scipy import io
 
-def load_single_sub(sub, cut, study=True, shuffle=True, visual=True, transpose=False):
+def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transpose=False):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
@@ -14,6 +14,9 @@ def load_single_sub(sub, cut, study=True, shuffle=True, visual=True, transpose=F
         name = "Subj{:02}_CleanData_{}_{}".format(sub,
                                                   'study' if study else 'test',
                                                   names[i])
+        if not study:
+            name += "_{}".format("visual" if visual else "lexical")
+
         print("loading: ", name)
         m = io.loadmat('{}/DATA/{}/{}.mat'.format(snic_tmp,
                                                   "Visual" if visual else "Verbal",
@@ -54,11 +57,11 @@ def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False,
 
     if idx is None:
         for sub in subs:
-            xn, yn = load_single_sub(sub, cut, shuffle, visual, transpose, study)
+            xn, yn = load_single_sub(sub, cut, study, shuffle, visual, transpose)
             x.append(xn)
             y.append(yn)
     else:
-        x, y = load_single_sub(idx, cut, shuffle, visual, transpose, study)
+        x, y = load_single_sub(idx, cut, study, shuffle, visual, transpose)
 
     print(x[0].shape)
     return (x, y)
