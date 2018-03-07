@@ -8,7 +8,7 @@ import tensorflow as tf
 
 from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
-from keras.layers import TimeDistributed
+from keras.layers import TimeDistributed, Lambda
 from keras.layers import SimpleRNN, RNN, LSTM, GRU
 from keras.layers import Conv1D, MaxPooling1D, Flatten
 from keras.layers import ELU
@@ -22,6 +22,7 @@ print(device_lib.list_local_devices())
 import models
 import data
 import util
+
 
 
 x, y = data.load_single(cut=True, visual=True, transpose=True)
@@ -45,6 +46,11 @@ def gen_model():
             "l3_dropout": 0.001, #np.random.ranf() * 0.75,
             "dense_nodes": 30} #np.random.randint(5, 50)}
 
+def offset_slice(inputs):
+    w = 730
+    r = np.random.randint(inputs.shape[1] - w + 1)
+    return inputs[:, r:r + w, :]
+
 
 for j in range(n_models):
 
@@ -52,7 +58,8 @@ for j in range(n_models):
     msets[j] = " " #mset
 
     m_in = Input(shape=x[0][0].shape)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_in)
+    m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off)
 
     m_t = Conv1D(30, 10, padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
@@ -98,7 +105,8 @@ for j in range(n_models):
 
             # fit with next kfold data
             model.fit(x[i][tr], y[i][tr],
-                      batch_size=64, epochs=50, verbose=0)
+                      validation_data=(x[i][val], y[i][val]),
+                      batch_size=64, epochs=50, verbose=1)
 
             loss, accuracy = model.evaluate(x[i][val], y[i][val],
                                             verbose=0)
