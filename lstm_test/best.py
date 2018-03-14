@@ -11,7 +11,7 @@ from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalizatio
 from keras.layers import TimeDistributed, Lambda
 from keras.layers import SimpleRNN, RNN, LSTM, GRU
 from keras.layers import Conv1D, MaxPooling1D, Flatten
-from keras.layers import ELU
+from keras.layers import ELU, PReLU, Activation
 
 from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
@@ -23,8 +23,8 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True, visual=False, transpose=True)
-xt, yt = data.load_single(cut=True, visual=False, study=False, transpose=True)
+x, y = data.load_single(cut=True, visual=True, transpose=True)
+xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
 print(x[0].shape)
 
 splits = 10
@@ -59,8 +59,8 @@ for j in range(n_models):
     msets[j] = " " #mset
 
     m_in = Input(shape=x[0][0].shape)
-    #m_off = Lambda(offset_slice)(m_in)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_in)
+    m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 1000))(m_off) # how much noice to have????
 
     m_t = Conv1D(30, 10, padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
@@ -81,8 +81,12 @@ for j in range(n_models):
     m_t = Dropout(0.2)(m_t)
 
     m_t = Flatten()(m_t)
-    m_t = Dense(50, activation='tanh')(m_t)
-    m_t = Dense(20, activation='tanh')(m_t)
+    m_t = Dense(50)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_t = Dense(20)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
     m_out = Dense(3, activation='softmax')(m_t)
 
     model = Model(inputs=m_in, outputs=m_out)
@@ -127,6 +131,7 @@ for j in range(n_models):
 
     avgacc /= n_subs
     accs[j] = avgacc
+    avgacc2 /= n_subs
     accs2[j] = avgacc2
     print("avg accuracy over all subjects {}/{}".format(avgacc, avgacc2))
 
