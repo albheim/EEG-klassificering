@@ -8,13 +8,15 @@ import tensorflow as tf
 
 from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
-from keras.layers import TimeDistributed, Lambda
+from keras.layers import TimeDistributed, Lambda, AlphaDropout
 from keras.layers import SimpleRNN, RNN, LSTM, GRU
 from keras.layers import Conv1D, MaxPooling1D, Flatten
 from keras.layers import ELU, PReLU, Activation
 
 from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
+
+from layers import GaussianNoiseAlways
 
 from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
@@ -30,6 +32,7 @@ print(x[0].shape)
 splits = 10
 n_subs = len(x)
 n_models = 100
+n_evaliter = 10
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
@@ -60,7 +63,7 @@ for j in range(n_models):
 
     m_in = Input(shape=x[0][0].shape)
     m_off = Lambda(offset_slice)(m_in)
-    m_noise = GaussianNoise(np.std(x[0][0] / 1000))(m_off) # how much noice to have????
+    m_noise = GaussianNoiseAlways(np.std(x[0][0] / 100))(m_off) # how much noice to have????
 
     m_t = Conv1D(30, 10, padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
@@ -111,15 +114,24 @@ for j in range(n_models):
             model.set_weights(w_save)
 
             # fit with next kfold data
-            model.fit(x[i][tr], y[i][tr],
-                      batch_size=64, epochs=50, verbose=0)
+            h = model.fit(x[i][tr], y[i][tr],
+                          batch_size=64, epochs=50, verbose=0)
+            h = h.history
 
-            loss, accuracy = model.evaluate(x[i][val], y[i][val],
-                                            verbose=0)
-            l2, a2 = model.evaluate(xt[i], yt[i], verbose=0)
+            p1 = np.zeros(y[i][val].shape)
+            p2 = np.zeros(yt[i].shape)
+            for i2 in range(n_evaliter):
+                p1 += model.predict(x[i][val])
+                p2 += model.predict(xt[i])
 
-            acc += accuracy
-            acc2 += a2
+            p1 /= n_evaliter
+            p2 /= n_evaliter
+
+            acc += np.mean(np.equal(np.argmax(p1, axis=-1),
+                                    np.argmax(y[i][val], axis=-1)))
+            acc2 += np.mean(np.equal(np.argmax(p2, axis=-1),
+                                     np.argmax(yt[i], axis=-1)))
+
 
         acc /= splits
         acc2 /= splits
