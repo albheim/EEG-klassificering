@@ -8,6 +8,7 @@ from keras.layers import Dense, Dropout, Input, BatchNormalization
 from keras.layers import AveragePooling2D, SeparableConv2D, DepthwiseConv2D
 from keras.layers import Conv2D, Flatten
 from keras.layers import ELU, Reshape
+from keras import regularizers
 
 from keras import backend as K
 
@@ -37,25 +38,25 @@ for j in range(n_models):
     m_in = Input(shape=(T, C))
     m_t = Reshape((T, C, 1))(m_in)
 
-    m_t = Conv2D(F, (256, 1), padding='same')(m_t)
+    m_t = Conv2D(F, (256, 1), padding='same',
+                 kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
     m_t = BatchNormalization()(m_t)
-    print(m_t._keras_shape)
-    m_t = DepthwiseConv2D((1, C), depth_multiplier=1, padding='valid')(m_t)
-    print(m_t._keras_shape)
+    m_t = DepthwiseConv2D((1, C), depth_multiplier=1, padding='valid',
+                          kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
     m_t = BatchNormalization()(m_t)
-    print(m_t._keras_shape)
     m_t = ELU()(m_t)
-    print(m_t._keras_shape)
     m_t = Dropout(0.25, noise_shape=(1, 1, F))(m_t)
-    print(m_t._keras_shape)
+    # print(m_t._keras_shape)
 
-    m_t = SeparableConv2D(F, (8, 1), padding='same')(m_t)
+    m_t = SeparableConv2D(F, (8, 1), padding='same',
+                          kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling2D((4, 1))(m_t)
     m_t = Dropout(0.25, noise_shape=(1, 1, F))(m_t)
 
-    m_t = SeparableConv2D(2 * F, (8, 1), padding='same')(m_t)
+    m_t = SeparableConv2D(2 * F, (8, 1), padding='same',
+                          kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling2D((4, 1))(m_t)
