@@ -88,8 +88,7 @@ for j in range(n_models):
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
-                          validation_data=(x[i][val], y[i][val]),
-                          batch_size=64, epochs=500, verbose=1)
+                          batch_size=64, epochs=500, verbose=0)
             h = h.history
 
 
