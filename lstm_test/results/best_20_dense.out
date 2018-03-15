@@ -1,0 +1,2521 @@
+data dir
+/lunarc/nobackup/users/albheim/EEG-klassificering/DATA
+script
+#!/bin/sh
+#SBATCH -t 60:00:00
+#SBATCH -J videns20
+#SBATCH -A lu2018-2-3
+#// SBATCH -o stdout_%j.out
+#// SBATCH -e stderr_%j.err
+
+# shold be lu or gpu
+#SBATCH -p gpu
+
+# how many gpus, 4 per node, using many seems to crash more often so stick with 1
+#SBATCH --gres=gpu:1
+
+# use 5 cores per GPU
+#SBATCH -n 5
+#SBATCH --mem-per-cpu=3100
+
+DATA_DIR="$(cat ../data_location.txt)"
+echo "data dir"
+echo $DATA_DIR
+
+echo "script"
+cat $0
+
+PY_FILE="best.py"
+echo "py file"
+cat $PY_FILE
+
+echo "nvidia smi"
+nvidia-smi
+
+echo "start time"
+date
+
+cp -r $DATA_DIR $SNIC_TMP
+ls $SNIC_TMP
+du -h "${SNIC_TMP}/DATA"
+
+echo "copy done time"
+date
+
+python $PY_FILE $SNIC_TMP
+
+echo "end time"
+date
+py file
+import sys
+from datetime import datetime
+
+import numpy as np
+from scipy import io
+
+import tensorflow as tf
+
+from keras.models import Sequential, Model
+from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
+from keras.layers import TimeDistributed, Lambda, AlphaDropout
+from keras.layers import SimpleRNN, RNN, LSTM, GRU
+from keras.layers import Conv1D, MaxPooling1D, Flatten
+from keras.layers import ELU, PReLU, Activation
+
+from keras.optimizers import SGD, Adam, RMSprop, Nadam
+from keras import backend as K
+
+from layers import GaussianNoiseAlways
+
+from tensorflow.python.client import device_lib
+print(device_lib.list_local_devices())
+
+import data
+import util
+
+
+x, y = data.load_single(cut=True, visual=True, transpose=True)
+xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
+print(x[0].shape)
+
+splits = 10
+n_subs = len(x)
+n_models = 100
+n_evaliter = 10
+msets = [None for j in range(n_models)]
+accs = [0 for j in range(n_models)]
+accs2 = [0 for j in range(n_models)]
+
+
+def gen_model():
+    return {"l1_nodes": 30, #np.random.randint(10, 40),
+            "l1_filter": 10, #np.random.randint(5, 30),
+            "l1_dropout": 0.2, #np.random.ranf() * 0.75,
+            "l2_nodes": 20, #np.random.randint(5, 30),
+            "l2_filter": 5, #np.random.randint(4, 20),
+            "l2_dropout": 0.2, #np.random.ranf() * 0.75,
+            "l3_nodes": 10, #np.random.randint(1, 15),
+            "l3_filter": 5, #np.random.randint(2, 15),
+            "l3_dropout": 0.001, #np.random.ranf() * 0.75,
+            "dense_nodes": 30} #np.random.randint(5, 50)}
+
+
+def offset_slice(inputs):
+    w = 730
+    r = np.random.randint(inputs.shape[1] - w + 1)
+    return inputs[:, r:r + w, :]
+
+for j in range(n_models):
+
+    mset = gen_model()
+    msets[j] = " " #mset
+
+    m_in = Input(shape=x[0][0].shape)
+    m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+
+    m_t = Conv1D(30, 10, padding='causal')(m_noise)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = MaxPooling1D(2)(m_t)
+    m_t = Dropout(0.2)(m_t)
+
+    m_t = Conv1D(30, 5, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = MaxPooling1D(2)(m_t)
+    m_t = Dropout(0.2)(m_t)
+
+    m_t = Conv1D(30, 5, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = MaxPooling1D(2)(m_t)
+    m_t = Dropout(0.2)(m_t)
+
+    m_t = Flatten()(m_t)
+    # m_t = Dense(50)(m_t)
+    # m_t = BatchNormalization()(m_t)
+    # m_t = Activation('tanh')(m_t)
+    m_t = Dense(20)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_out = Dense(3, activation='softmax')(m_t)
+
+    model = Model(inputs=m_in, outputs=m_out)
+
+    model.compile(loss='categorical_crossentropy',
+                  optimizer='rmsprop',
+                  metrics=['accuracy'])
+
+    if j == 0:
+        model.summary()
+
+
+    w_save = model.get_weights()
+    avgacc = 0
+    avgacc2 = 0
+    for i in range(n_subs):
+        n = x[i].shape[0]
+        acc = 0
+        acc2 = 0
+        for tr, val in util.kfold(n, splits):
+            # reset to initial weights
+            model.set_weights(w_save)
+
+            # fit with next kfold data
+            h = model.fit(x[i][tr], y[i][tr],
+                          batch_size=64, epochs=50, verbose=0)
+            h = h.history
+
+
+            _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
+            _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
+
+            acc += a
+            acc2 += a2
+
+
+        acc /= splits
+        acc2 /= splits
+        avgacc += acc
+        avgacc2 += acc2
+
+        print("subject {}, avg accuracy {}/{} over {} splits".format(i + 1 if i + 1 < 10 else i + 2,
+                                                                     acc, acc2, splits))
+
+    avgacc /= n_subs
+    accs[j] = avgacc
+    avgacc2 /= n_subs
+    accs2[j] = avgacc2
+    print("avg accuracy over all subjects {}/{}".format(avgacc, avgacc2))
+
+
+for a, a2 in sorted(zip(accs, accs2)):
+    print("acc {}/{}\n".format(a, a2))
+
+print("avg over all trials and subjects {}/{}".format(sum(accs) / len(accs), sum(accs2) / len(accs2)))
+nvidia smi
+Wed Mar 14 14:03:51 2018       
++------------------------------------------------------+                       
+| NVIDIA-SMI 352.93     Driver Version: 384.81         |                       
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla K80           On   | 0000:04:00.0     Off |                    0 |
+| N/A   51C    P0   108W / 149W |  10974MiB / 11439MiB |     60%      Default |
++-------------------------------+----------------------+----------------------+
+|   1  Tesla K80           On   | 0000:05:00.0     Off |                    0 |
+| N/A   73C    P0   121W / 149W |  10974MiB / 11439MiB |     59%      Default |
++-------------------------------+----------------------+----------------------+
+|   2  Tesla K80           On   | 0000:84:00.0     Off |                    0 |
+| N/A   49C    P0    95W / 149W |  10974MiB / 11439MiB |     47%      Default |
++-------------------------------+----------------------+----------------------+
+|   3  Tesla K80           On   | 0000:85:00.0     Off |                    0 |
+| N/A   47C    P8    31W / 149W |      1MiB / 11439MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID  Type  Process name                               Usage      |
+|=============================================================================|
+|    0     65040    C   python                                       10961MiB |
+|    1     65041    C   python                                       10961MiB |
+|    2     69208    C   python                                       10961MiB |
++-----------------------------------------------------------------------------+
+start time
+Wed Mar 14 14:03:51 CET 2018
+DATA
+2.4G	/local/slurmtmp.521098/DATA/Visual
+2.4G	/local/slurmtmp.521098/DATA/Verbal
+388M	/local/slurmtmp.521098/DATA/Modified/marginal
+388M	/local/slurmtmp.521098/DATA/Modified
+5.1G	/local/slurmtmp.521098/DATA
+copy done time
+Wed Mar 14 14:05:02 CET 2018
+2018-03-14 14:05:03.756988: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-03-14 14:05:04.026643: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-03-14 14:05:04.026766: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-03-14 14:05:23.330277: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/keras-gpu/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 5168775685834463519
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11324823962
+locality {
+  bus_id: 2
+}
+incarnation: 18271936204899233310
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+loading:  Subj01_CleanData_study_FA
+loading:  Subj01_CleanData_study_LM
+loading:  Subj01_CleanData_study_OB
+loading:  Subj02_CleanData_study_FA
+loading:  Subj02_CleanData_study_LM
+loading:  Subj02_CleanData_study_OB
+loading:  Subj03_CleanData_study_FA
+loading:  Subj03_CleanData_study_LM
+loading:  Subj03_CleanData_study_OB
+loading:  Subj04_CleanData_study_FA
+loading:  Subj04_CleanData_study_LM
+loading:  Subj04_CleanData_study_OB
+loading:  Subj05_CleanData_study_FA
+loading:  Subj05_CleanData_study_LM
+loading:  Subj05_CleanData_study_OB
+loading:  Subj06_CleanData_study_FA
+loading:  Subj06_CleanData_study_LM
+loading:  Subj06_CleanData_study_OB
+loading:  Subj07_CleanData_study_FA
+loading:  Subj07_CleanData_study_LM
+loading:  Subj07_CleanData_study_OB
+loading:  Subj08_CleanData_study_FA
+loading:  Subj08_CleanData_study_LM
+loading:  Subj08_CleanData_study_OB
+loading:  Subj09_CleanData_study_FA
+loading:  Subj09_CleanData_study_LM
+loading:  Subj09_CleanData_study_OB
+loading:  Subj11_CleanData_study_FA
+loading:  Subj11_CleanData_study_LM
+loading:  Subj11_CleanData_study_OB
+loading:  Subj12_CleanData_study_FA
+loading:  Subj12_CleanData_study_LM
+loading:  Subj12_CleanData_study_OB
+loading:  Subj13_CleanData_study_FA
+loading:  Subj13_CleanData_study_LM
+loading:  Subj13_CleanData_study_OB
+loading:  Subj14_CleanData_study_FA
+loading:  Subj14_CleanData_study_LM
+loading:  Subj14_CleanData_study_OB
+loading:  Subj15_CleanData_study_FA
+loading:  Subj15_CleanData_study_LM
+loading:  Subj15_CleanData_study_OB
+loading:  Subj16_CleanData_study_FA
+loading:  Subj16_CleanData_study_LM
+loading:  Subj16_CleanData_study_OB
+loading:  Subj17_CleanData_study_FA
+loading:  Subj17_CleanData_study_LM
+loading:  Subj17_CleanData_study_OB
+loading:  Subj18_CleanData_study_FA
+loading:  Subj18_CleanData_study_LM
+loading:  Subj18_CleanData_study_OB
+loading:  Subj19_CleanData_study_FA
+loading:  Subj19_CleanData_study_LM
+loading:  Subj19_CleanData_study_OB
+(185, 768, 31)
+loading:  Subj01_CleanData_test_FA_visual
+loading:  Subj01_CleanData_test_LM_visual
+loading:  Subj01_CleanData_test_OB_visual
+loading:  Subj02_CleanData_test_FA_visual
+loading:  Subj02_CleanData_test_LM_visual
+loading:  Subj02_CleanData_test_OB_visual
+loading:  Subj03_CleanData_test_FA_visual
+loading:  Subj03_CleanData_test_LM_visual
+loading:  Subj03_CleanData_test_OB_visual
+loading:  Subj04_CleanData_test_FA_visual
+loading:  Subj04_CleanData_test_LM_visual
+loading:  Subj04_CleanData_test_OB_visual
+loading:  Subj05_CleanData_test_FA_visual
+loading:  Subj05_CleanData_test_LM_visual
+loading:  Subj05_CleanData_test_OB_visual
+loading:  Subj06_CleanData_test_FA_visual
+loading:  Subj06_CleanData_test_LM_visual
+loading:  Subj06_CleanData_test_OB_visual
+loading:  Subj07_CleanData_test_FA_visual
+loading:  Subj07_CleanData_test_LM_visual
+loading:  Subj07_CleanData_test_OB_visual
+loading:  Subj08_CleanData_test_FA_visual
+loading:  Subj08_CleanData_test_LM_visual
+loading:  Subj08_CleanData_test_OB_visual
+loading:  Subj09_CleanData_test_FA_visual
+loading:  Subj09_CleanData_test_LM_visual
+loading:  Subj09_CleanData_test_OB_visual
+loading:  Subj11_CleanData_test_FA_visual
+loading:  Subj11_CleanData_test_LM_visual
+loading:  Subj11_CleanData_test_OB_visual
+loading:  Subj12_CleanData_test_FA_visual
+loading:  Subj12_CleanData_test_LM_visual
+loading:  Subj12_CleanData_test_OB_visual
+loading:  Subj13_CleanData_test_FA_visual
+loading:  Subj13_CleanData_test_LM_visual
+loading:  Subj13_CleanData_test_OB_visual
+loading:  Subj14_CleanData_test_FA_visual
+loading:  Subj14_CleanData_test_LM_visual
+loading:  Subj14_CleanData_test_OB_visual
+loading:  Subj15_CleanData_test_FA_visual
+loading:  Subj15_CleanData_test_LM_visual
+loading:  Subj15_CleanData_test_OB_visual
+loading:  Subj16_CleanData_test_FA_visual
+loading:  Subj16_CleanData_test_LM_visual
+loading:  Subj16_CleanData_test_OB_visual
+loading:  Subj17_CleanData_test_FA_visual
+loading:  Subj17_CleanData_test_LM_visual
+loading:  Subj17_CleanData_test_OB_visual
+loading:  Subj18_CleanData_test_FA_visual
+loading:  Subj18_CleanData_test_LM_visual
+loading:  Subj18_CleanData_test_OB_visual
+loading:  Subj19_CleanData_test_FA_visual
+loading:  Subj19_CleanData_test_LM_visual
+loading:  Subj19_CleanData_test_OB_visual
+(90, 768, 31)
+(185, 768, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 768, 31)           0         
+_________________________________________________________________
+lambda_1 (Lambda)            (None, 730, 31)           0         
+_________________________________________________________________
+gaussian_noise_1 (GaussianNo (None, 730, 31)           0         
+_________________________________________________________________
+conv1d_1 (Conv1D)            (None, 730, 30)           9330      
+_________________________________________________________________
+batch_normalization_1 (Batch (None, 730, 30)           120       
+_________________________________________________________________
+elu_1 (ELU)                  (None, 730, 30)           0         
+_________________________________________________________________
+max_pooling1d_1 (MaxPooling1 (None, 365, 30)           0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 365, 30)           0         
+_________________________________________________________________
+conv1d_2 (Conv1D)            (None, 365, 30)           4530      
+_________________________________________________________________
+batch_normalization_2 (Batch (None, 365, 30)           120       
+_________________________________________________________________
+elu_2 (ELU)                  (None, 365, 30)           0         
+_________________________________________________________________
+max_pooling1d_2 (MaxPooling1 (None, 182, 30)           0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 182, 30)           0         
+_________________________________________________________________
+conv1d_3 (Conv1D)            (None, 182, 30)           4530      
+_________________________________________________________________
+batch_normalization_3 (Batch (None, 182, 30)           120       
+_________________________________________________________________
+elu_3 (ELU)                  (None, 182, 30)           0         
+_________________________________________________________________
+max_pooling1d_3 (MaxPooling1 (None, 91, 30)            0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 91, 30)            0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 2730)              0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 3)                 8193      
+=================================================================
+Total params: 26,943
+Trainable params: 26,763
+Non-trainable params: 180
+_________________________________________________________________
+subject 1, avg accuracy 0.7450292408466339/0.3066666674613952 over 10 splits
+subject 2, avg accuracy 0.7061403453350067/0.433783784589252 over 10 splits
+subject 3, avg accuracy 0.8280701816082001/0.3530769230769232 over 10 splits
+subject 4, avg accuracy 0.8102339267730713/0.3864583333333333 over 10 splits
+subject 5, avg accuracy 0.8505847990512848/0.333027523441599 over 10 splits
+subject 6, avg accuracy 0.7394736886024476/0.35289256353516224 over 10 splits
+subject 7, avg accuracy 0.7011695921421051/0.28275861930230567 over 10 splits
+subject 8, avg accuracy 0.7947368502616883/0.37079646365832436 over 10 splits
+subject 9, avg accuracy 0.838596498966217/0.30602409633168254 over 10 splits
+subject 11, avg accuracy 0.7964912354946136/0.3510204081632653 over 10 splits
+subject 12, avg accuracy 0.7473684251308441/0.294736840034786 over 10 splits
+subject 13, avg accuracy 0.7985380053520202/0.3407079654193558 over 10 splits
+subject 14, avg accuracy 0.7642105370759964/0.40000000140956926 over 10 splits
+subject 15, avg accuracy 0.7959064304828644/0.33679999979138364 over 10 splits
+subject 16, avg accuracy 0.7871052742004394/0.3741935525209673 over 10 splits
+subject 17, avg accuracy 0.7631578981876374/0.35147058823529415 over 10 splits
+subject 18, avg accuracy 0.7576023399829864/0.3214285720671926 over 10 splits
+subject 19, avg accuracy 0.7856725096702576/0.3241758248471952 over 10 splits
+avg accuracy over all subjects 0.778338209953573/0.3455565959566104
+subject 1, avg accuracy 0.696198832988739/0.3233333357175191 over 10 splits
+subject 2, avg accuracy 0.716374272108078/0.443243244008438 over 10 splits
+subject 3, avg accuracy 0.8660818636417389/0.3615384615384616 over 10 splits
+subject 4, avg accuracy 0.8061403572559357/0.39270833333333327 over 10 splits
+subject 5, avg accuracy 0.8564327478408813/0.31926605518257944 over 10 splits
+subject 6, avg accuracy 0.7461988270282746/0.37107438147068017 over 10 splits
+subject 7, avg accuracy 0.7073099434375762/0.34482758487093035 over 10 splits
+subject 8, avg accuracy 0.7736842155456543/0.35486725990751145 over 10 splits
+subject 9, avg accuracy 0.7692982494831085/0.31807228784604247 over 10 splits
+subject 11, avg accuracy 0.7190058499574661/0.35204081632653056 over 10 splits
+subject 12, avg accuracy 0.7842105388641357/0.28947368195182394 over 10 splits
+subject 13, avg accuracy 0.8242690086364746/0.3176991162706266 over 10 splits
+subject 14, avg accuracy 0.7739473640918731/0.4337837847503456 over 10 splits
+subject 15, avg accuracy 0.823099410533905/0.30879999941587444 over 10 splits
+subject 16, avg accuracy 0.7344736814498901/0.3629032301325952 over 10 splits
+subject 17, avg accuracy 0.7842105269432068/0.34411764705882353 over 10 splits
+subject 18, avg accuracy 0.7795321583747864/0.2885714292100497 over 10 splits
+subject 19, avg accuracy 0.7511695921421051/0.31318681328506254 over 10 splits
+avg accuracy over all subjects 0.7728687466846572/0.34663930345984595
+subject 1, avg accuracy 0.7359649062156677/0.33333333608176974 over 10 splits
+subject 2, avg accuracy 0.7660818636417389/0.4081081093565838 over 10 splits
+subject 3, avg accuracy 0.8558479607105255/0.37307692307692314 over 10 splits
+subject 4, avg accuracy 0.8160818755626679/0.378125 over 10 splits
+subject 5, avg accuracy 0.8616959035396576/0.32018348712713346 over 10 splits
+subject 6, avg accuracy 0.7824561357498169/0.3619834712467903 over 10 splits
+subject 7, avg accuracy 0.6280701845884323/0.34022988363586626 over 10 splits
+subject 8, avg accuracy 0.810526317358017/0.37699115392381116 over 10 splits
+subject 9, avg accuracy 0.806725138425827/0.310843372632222 over 10 splits
+subject 11, avg accuracy 0.7470760345458984/0.36020408163265305 over 10 splits
+subject 12, avg accuracy 0.7526315808296203/0.28315789222717286 over 10 splits
+subject 13, avg accuracy 0.7985380172729493/0.34955752472170687 over 10 splits
+subject 14, avg accuracy 0.7434210479259491/0.4216216225076367 over 10 splits
+subject 15, avg accuracy 0.7900584816932679/0.3647999992370606 over 10 splits
+subject 16, avg accuracy 0.7813157856464386/0.3919354887258622 over 10 splits
+subject 17, avg accuracy 0.7789473712444306/0.3411764705882353 over 10 splits
+subject 18, avg accuracy 0.7356725066900254/0.2671428577814784 over 10 splits
+subject 19, avg accuracy 0.7561403512954712/0.2989010989829734 over 10 splits
+avg accuracy over all subjects 0.7748473034964669/0.3489650985269933
+subject 1, avg accuracy 0.7339181303977966/0.3100000013079908 over 10 splits
+subject 2, avg accuracy 0.710526317358017/0.3824324333184474 over 10 splits
+subject 3, avg accuracy 0.8973684251308441/0.3315384615384616 over 10 splits
+subject 4, avg accuracy 0.7944444477558136/0.3645833333333333 over 10 splits
+subject 5, avg accuracy 0.839473694562912/0.3183486242223223 over 10 splits
+subject 6, avg accuracy 0.6923976570367814/0.33140495916412877 over 10 splits
+subject 7, avg accuracy 0.7233918130397796/0.34482758440848055 over 10 splits
+subject 8, avg accuracy 0.810526329278946/0.35486725985476403 over 10 splits
+subject 9, avg accuracy 0.7897660851478576/0.3084337353526828 over 10 splits
+subject 11, avg accuracy 0.8233918130397797/0.3785714285714286 over 10 splits
+subject 12, avg accuracy 0.721052634716034/0.29157894504697696 over 10 splits
+subject 13, avg accuracy 0.787426906824112/0.3168141605184142 over 10 splits
+subject 14, avg accuracy 0.7373684167861938/0.4027027033470773 over 10 splits
+subject 15, avg accuracy 0.8181286573410034/0.3423999990463256 over 10 splits
+subject 16, avg accuracy 0.7397368401288986/0.38709677900037454 over 10 splits
+subject 17, avg accuracy 0.7789473712444306/0.34705882352941175 over 10 splits
+subject 18, avg accuracy 0.7675438582897186/0.2971428576111793 over 10 splits
+subject 19, avg accuracy 0.7783625721931458/0.3219780219125224 over 10 splits
+avg accuracy over all subjects 0.774653998348448/0.34065445061579563
+subject 1, avg accuracy 0.7400584816932678/0.32888889173666636 over 10 splits
+subject 2, avg accuracy 0.7160818815231323/0.440540541668196 over 10 splits
+subject 3, avg accuracy 0.8552631676197052/0.3261538461538461 over 10 splits
+subject 4, avg accuracy 0.7631578981876374/0.3635416666666666 over 10 splits
+subject 5, avg accuracy 0.8564327478408813/0.30917431255546185 over 10 splits
+subject 6, avg accuracy 0.7619882941246032/0.320661157874529 over 10 splits
+subject 7, avg accuracy 0.6961988270282745/0.34252873390227895 over 10 splits
+subject 8, avg accuracy 0.7526315808296203/0.3584070827581186 over 10 splits
+subject 9, avg accuracy 0.8008772015571595/0.30602409611624404 over 10 splits
+subject 11, avg accuracy 0.7959064304828644/0.3714285714285714 over 10 splits
+subject 12, avg accuracy 0.768421059846878/0.2842105238688619 over 10 splits
+subject 13, avg accuracy 0.7815789580345154/0.3300884968411606 over 10 splits
+subject 14, avg accuracy 0.7376315832138062/0.45405405445678815 over 10 splits
+subject 15, avg accuracy 0.7736842036247253/0.34479999990463256 over 10 splits
+subject 16, avg accuracy 0.7550000071525573/0.3854838755342268 over 10 splits
+subject 17, avg accuracy 0.778947377204895/0.3647058823529412 over 10 splits
+subject 18, avg accuracy 0.7201754450798035/0.29428571492433553 over 10 splits
+subject 19, avg accuracy 0.7461988389492035/0.2999999987882572 over 10 splits
+avg accuracy over all subjects 0.7666796657774183/0.3458320804184324
+subject 1, avg accuracy 0.7292397618293762/0.3444444467624028 over 10 splits
+subject 2, avg accuracy 0.7166666686534882/0.4054054060497799 over 10 splits
+subject 3, avg accuracy 0.838596498966217/0.3676923076923077 over 10 splits
+subject 4, avg accuracy 0.7774853765964508/0.36875 over 10 splits
+subject 5, avg accuracy 0.8561403512954712/0.3321100924950127 over 10 splits
+subject 6, avg accuracy 0.7225146174430848/0.3900826453916298 over 10 splits
+subject 7, avg accuracy 0.7292397737503051/0.28160919439176035 over 10 splits
+subject 8, avg accuracy 0.7526315808296203/0.3646017729444841 over 10 splits
+subject 9, avg accuracy 0.7953216433525085/0.3060240961880569 over 10 splits
+subject 11, avg accuracy 0.7619883000850678/0.3346938775510204 over 10 splits
+subject 12, avg accuracy 0.7736842155456543/0.3157894708294618 over 10 splits
+subject 13, avg accuracy 0.7552631676197052/0.34601770048647856 over 10 splits
+subject 14, avg accuracy 0.7697368502616883/0.4405405410640949 over 10 splits
+subject 15, avg accuracy 0.7961988270282745/0.3264000002324581 over 10 splits
+subject 16, avg accuracy 0.7555263102054596/0.3806451654241931 over 10 splits
+subject 17, avg accuracy 0.7210526406764984/0.33529411764705885 over 10 splits
+subject 18, avg accuracy 0.7362573146820068/0.2385714292526245 over 10 splits
+subject 19, avg accuracy 0.7347953259944916/0.33736263801763344 over 10 splits
+avg accuracy over all subjects 0.7623521791564094/0.3453352723566921
+subject 1, avg accuracy 0.7400584816932678/0.3411111129985916 over 10 splits
+subject 2, avg accuracy 0.710526317358017/0.37297297402008167 over 10 splits
+subject 3, avg accuracy 0.8710526287555694/0.3500000000000001 over 10 splits
+subject 4, avg accuracy 0.8105263233184814/0.3791666666666667 over 10 splits
+subject 5, avg accuracy 0.8245614051818848/0.32568807377727754 over 10 splits
+subject 6, avg accuracy 0.7464912176132202/0.32314049620027385 over 10 splits
+subject 7, avg accuracy 0.7073099464178085/0.2816091932613274 over 10 splits
+subject 8, avg accuracy 0.7789473712444306/0.3752212424985076 over 10 splits
+subject 9, avg accuracy 0.8119883120059967/0.3253012045679322 over 10 splits
+subject 11, avg accuracy 0.7687134444713593/0.373469387755102 over 10 splits
+subject 12, avg accuracy 0.7631578981876374/0.28842104999642626 over 10 splits
+subject 13, avg accuracy 0.7868421137332916/0.3168141603865454 over 10 splits
+subject 14, avg accuracy 0.748421049118042/0.4202702714784725 over 10 splits
+subject 15, avg accuracy 0.8125730931758881/0.3351999994874001 over 10 splits
+subject 16, avg accuracy 0.7499999940395355/0.4338709733178539 over 10 splits
+subject 17, avg accuracy 0.8157894790172577/0.32500000000000007 over 10 splits
+subject 18, avg accuracy 0.7640350908041/0.2742857148817607 over 10 splits
+subject 19, avg accuracy 0.7450292348861695/0.31758241849941216 over 10 splits
+avg accuracy over all subjects 0.7753346333901088/0.3421736077663129
+subject 1, avg accuracy 0.7728070259094239/0.32333333472410836 over 10 splits
+subject 2, avg accuracy 0.7230994164943695/0.43378378491143926 over 10 splits
+subject 3, avg accuracy 0.8444444477558136/0.3653846153846154 over 10 splits
+subject 4, avg accuracy 0.7739766120910645/0.35937499999999994 over 10 splits
+subject 5, avg accuracy 0.8666666746139526/0.36788990881738315 over 10 splits
+subject 6, avg accuracy 0.735087725520134/0.3628099172814818 over 10 splits
+subject 7, avg accuracy 0.7447368443012238/0.3160919537146886 over 10 splits
+subject 8, avg accuracy 0.8052631616592407/0.3699115081698493 over 10 splits
+subject 9, avg accuracy 0.7964912295341492/0.2999999999730702 over 10 splits
+subject 11, avg accuracy 0.7847953259944915/0.35510204081632657 over 10 splits
+subject 12, avg accuracy 0.7947368383407593/0.31473683972107735 over 10 splits
+subject 13, avg accuracy 0.7760233879089355/0.34070796549847693 over 10 splits
+subject 14, avg accuracy 0.7328947424888611/0.43918919039739135 over 10 splits
+subject 15, avg accuracy 0.8014619827270508/0.3112000001132488 over 10 splits
+subject 16, avg accuracy 0.760526317358017/0.4258064552660912 over 10 splits
+subject 17, avg accuracy 0.7368421077728271/0.3573529411764706 over 10 splits
+subject 18, avg accuracy 0.7634502977132798/0.28285714336803985 over 10 splits
+subject 19, avg accuracy 0.8169590651988983/0.3197802184374777 over 10 splits
+avg accuracy over all subjects 0.779459066854583/0.35251737876506867
+subject 1, avg accuracy 0.7505847990512848/0.32333333487312005 over 10 splits
+subject 2, avg accuracy 0.7423976719379425/0.4000000012082022 over 10 splits
+subject 3, avg accuracy 0.8222222208976746/0.36692307692307696 over 10 splits
+subject 4, avg accuracy 0.8052631556987763/0.3885416666666666 over 10 splits
+subject 5, avg accuracy 0.8821637392044067/0.3174311932278882 over 10 splits
+subject 6, avg accuracy 0.8099415242671967/0.3247933895627329 over 10 splits
+subject 7, avg accuracy 0.6654970735311508/0.29425287241565773 over 10 splits
+subject 8, avg accuracy 0.7894736886024475/0.36460177365657503 over 10 splits
+subject 9, avg accuracy 0.7953216433525085/0.29277108422963016 over 10 splits
+subject 11, avg accuracy 0.7739766061305999/0.36938775510204075 over 10 splits
+subject 12, avg accuracy 0.778947377204895/0.30105262903790725 over 10 splits
+subject 13, avg accuracy 0.7868421077728271/0.3345132755099145 over 10 splits
+subject 14, avg accuracy 0.7276315748691559/0.43243243307680695 over 10 splits
+subject 15, avg accuracy 0.7850877165794372/0.33920000069141387 over 10 splits
+subject 16, avg accuracy 0.7818421065807343/0.39516129522554333 over 10 splits
+subject 17, avg accuracy 0.8000000059604645/0.29117647058823526 over 10 splits
+subject 18, avg accuracy 0.7961988329887391/0.2885714291249003 over 10 splits
+subject 19, avg accuracy 0.7461988389492035/0.3395604392329415 over 10 splits
+avg accuracy over all subjects 0.7799772601988582/0.3424280066862918
+subject 1, avg accuracy 0.6912280797958374/0.33444444755713143 over 10 splits
+subject 2, avg accuracy 0.7660818696022034/0.3810810821281897 over 10 splits
+subject 3, avg accuracy 0.8877192914485932/0.3646153846153847 over 10 splits
+subject 4, avg accuracy 0.7616959095001221/0.4135416666666667 over 10 splits
+subject 5, avg accuracy 0.8561403512954712/0.33669724855401095 over 10 splits
+subject 6, avg accuracy 0.7073099434375762/0.36528925666631745 over 10 splits
+subject 7, avg accuracy 0.680701756477356/0.3183908033302461 over 10 splits
+subject 8, avg accuracy 0.7842105269432068/0.3566371720449059 over 10 splits
+subject 9, avg accuracy 0.8005847930908203/0.3361445794981646 over 10 splits
+subject 11, avg accuracy 0.7353801131248474/0.35408163265306125 over 10 splits
+subject 12, avg accuracy 0.7578947454690933/0.30105262919476156 over 10 splits
+subject 13, avg accuracy 0.7926900565624238/0.340707965801775 over 10 splits
+subject 14, avg accuracy 0.7015789449214935/0.4202702713173789 over 10 splits
+subject 15, avg accuracy 0.7897660851478576/0.35519999853372575 over 10 splits
+subject 16, avg accuracy 0.7505263149738312/0.3580645215126776 over 10 splits
+subject 17, avg accuracy 0.721052634716034/0.3411764705882353 over 10 splits
+subject 18, avg accuracy 0.763450288772583/0.29571428622518264 over 10 splits
+subject 19, avg accuracy 0.7236842095851899/0.2956043952113979 over 10 splits
+avg accuracy over all subjects 0.7595386619369191/0.34826187844995626
+subject 1, avg accuracy 0.7295321702957154/0.3177777793010076 over 10 splits
+subject 2, avg accuracy 0.7228070259094238/0.39324324429035185 over 10 splits
+subject 3, avg accuracy 0.8336257338523865/0.3438461538461539 over 10 splits
+subject 4, avg accuracy 0.8/0.4177083333333333 over 10 splits
+subject 5, avg accuracy 0.8502924025058747/0.31100917466736716 over 10 splits
+subject 6, avg accuracy 0.7014619886875153/0.34380165523241374 over 10 splits
+subject 7, avg accuracy 0.7230994164943695/0.28620689584948555 over 10 splits
+subject 8, avg accuracy 0.8052631735801696/0.36283186154555425 over 10 splits
+subject 9, avg accuracy 0.8061403632164001/0.34698795083775574 over 10 splits
+subject 11, avg accuracy 0.7792397677898407/0.3510204081632653 over 10 splits
+subject 12, avg accuracy 0.7789473712444306/0.30315789181935154 over 10 splits
+subject 13, avg accuracy 0.7918128669261932/0.34424778903480124 over 10 splits
+subject 14, avg accuracy 0.7857894837856293/0.43108108200736944 over 10 splits
+subject 15, avg accuracy 0.7739766061305999/0.36559999910593033 over 10 splits
+subject 16, avg accuracy 0.8076315879821777/0.3693548432761623 over 10 splits
+subject 17, avg accuracy 0.7315789520740509/0.32205882352941173 over 10 splits
+subject 18, avg accuracy 0.7967836201190949/0.2642857148817607 over 10 splits
+subject 19, avg accuracy 0.745321637392044/0.2978021970489523 over 10 splits
+avg accuracy over all subjects 0.775739120443662/0.3428900998761349
+subject 1, avg accuracy 0.7134502947330474/0.2955555583702193 over 10 splits
+subject 2, avg accuracy 0.7377193063497544/0.40945946018438084 over 10 splits
+subject 3, avg accuracy 0.8760233938694/0.36615384615384616 over 10 splits
+subject 4, avg accuracy 0.7830409407615662/0.3770833333333333 over 10 splits
+subject 5, avg accuracy 0.8880116939544678/0.34678899163226473 over 10 splits
+subject 6, avg accuracy 0.7076023399829865/0.36115702591405424 over 10 splits
+subject 7, avg accuracy 0.6912280678749084/0.28735632129099176 over 10 splits
+subject 8, avg accuracy 0.7894736886024475/0.34690265758375155 over 10 splits
+subject 9, avg accuracy 0.8222222208976746/0.3096385544323059 over 10 splits
+subject 11, avg accuracy 0.7412280678749085/0.3459183673469388 over 10 splits
+subject 12, avg accuracy 0.7842105388641357/0.30105262910064895 over 10 splits
+subject 13, avg accuracy 0.7500000059604645/0.30088495721595476 over 10 splits
+subject 14, avg accuracy 0.7899999916553497/0.43918918999465734 over 10 splits
+subject 15, avg accuracy 0.8236841976642608/0.320800000333786 over 10 splits
+subject 16, avg accuracy 0.8081578969955444/0.41612903677648116 over 10 splits
+subject 17, avg accuracy 0.7368421137332917/0.361764705882353 over 10 splits
+subject 18, avg accuracy 0.7836257338523864/0.22571428609745844 over 10 splits
+subject 19, avg accuracy 0.7336257338523865/0.3054945044792615 over 10 splits
+avg accuracy over all subjects 0.7755636793043877/0.3398357458957048
+subject 1, avg accuracy 0.7941520512104034/0.34111111316416 over 10 splits
+subject 2, avg accuracy 0.7704678416252136/0.38378378446843164 over 10 splits
+subject 3, avg accuracy 0.8713450253009796/0.3676923076923077 over 10 splits
+subject 4, avg accuracy 0.7997076094150544/0.3822916666666667 over 10 splits
+subject 5, avg accuracy 0.829824560880661/0.34128440412769623 over 10 splits
+subject 6, avg accuracy 0.7406432747840881/0.3520661153576591 over 10 splits
+subject 7, avg accuracy 0.734210529923439/0.2770114922660521 over 10 splits
+subject 8, avg accuracy 0.7526315927505494/0.3530973481920968 over 10 splits
+subject 9, avg accuracy 0.791228073835373/0.30963855310376875 over 10 splits
+subject 11, avg accuracy 0.7576023459434509/0.373469387755102 over 10 splits
+subject 12, avg accuracy 0.768421059846878/0.31157894463915575 over 10 splits
+subject 13, avg accuracy 0.8134502947330475/0.3486725676376207 over 10 splits
+subject 14, avg accuracy 0.7328947365283967/0.45675675744140465 over 10 splits
+subject 15, avg accuracy 0.8125730931758881/0.3279999994874001 over 10 splits
+subject 16, avg accuracy 0.7810526430606842/0.4129032301325951 over 10 splits
+subject 17, avg accuracy 0.6894736886024475/0.3411764705882353 over 10 splits
+subject 18, avg accuracy 0.7903508722782135/0.34285714353833885 over 10 splits
+subject 19, avg accuracy 0.6961988270282745/0.30659340628228343 over 10 splits
+avg accuracy over all subjects 0.7736793400512804/0.35166581625227633
+subject 1, avg accuracy 0.7669590592384339/0.3100000017219119 over 10 splits
+subject 2, avg accuracy 0.7008772015571594/0.42162162230626965 over 10 splits
+subject 3, avg accuracy 0.8178362607955932/0.38384615384615384 over 10 splits
+subject 4, avg accuracy 0.7991228103637695/0.35625 over 10 splits
+subject 5, avg accuracy 0.8672514736652375/0.34036697317427456 over 10 splits
+subject 6, avg accuracy 0.6757309913635254/0.33966942266984423 over 10 splits
+subject 7, avg accuracy 0.7178362548351288/0.32528735549970605 over 10 splits
+subject 8, avg accuracy 0.7578947424888611/0.37876106579746827 over 10 splits
+subject 9, avg accuracy 0.7637426912784576/0.33373493922043995 over 10 splits
+subject 11, avg accuracy 0.7792397677898407/0.3336734693877551 over 10 splits
+subject 12, avg accuracy 0.778947377204895/0.2852631556674054 over 10 splits
+subject 13, avg accuracy 0.8137426972389221/0.36548672661317133 over 10 splits
+subject 14, avg accuracy 0.7489473700523377/0.3783783791032997 over 10 splits
+subject 15, avg accuracy 0.8292397558689117/0.3391999999165535 over 10 splits
+subject 16, avg accuracy 0.7763157904148101/0.3693548435645718 over 10 splits
+subject 17, avg accuracy 0.7631578981876374/0.3411764705882353 over 10 splits
+subject 18, avg accuracy 0.7730994105339051/0.30428571462631226 over 10 splits
+subject 19, avg accuracy 0.768128651380539/0.3175824170911705 over 10 splits
+avg accuracy over all subjects 0.7721150113476649/0.345774372821919
+subject 1, avg accuracy 0.7295321643352508/0.32444444742467665 over 10 splits
+subject 2, avg accuracy 0.7219298303127288/0.42297297442281573 over 10 splits
+subject 3, avg accuracy 0.85/0.36692307692307696 over 10 splits
+subject 4, avg accuracy 0.7894736886024475/0.36875 over 10 splits
+subject 5, avg accuracy 0.8461988270282745/0.3247706424479091 over 10 splits
+subject 6, avg accuracy 0.7730994164943695/0.3090909093987843 over 10 splits
+subject 7, avg accuracy 0.6921052724123001/0.31954022832643025 over 10 splits
+subject 8, avg accuracy 0.7736842095851898/0.36106194869606895 over 10 splits
+subject 9, avg accuracy 0.8380116999149323/0.31325301255088256 over 10 splits
+subject 11, avg accuracy 0.7745614051818848/0.3663265306122449 over 10 splits
+subject 12, avg accuracy 0.800000011920929/0.29578947120591215 over 10 splits
+subject 13, avg accuracy 0.7815789520740509/0.3769911524468818 over 10 splits
+subject 14, avg accuracy 0.7694736778736114/0.42297297432213216 over 10 splits
+subject 15, avg accuracy 0.8178362488746643/0.32959999949932095 over 10 splits
+subject 16, avg accuracy 0.8028947412967682/0.4290322627752058 over 10 splits
+subject 17, avg accuracy 0.7842105269432068/0.33382352941176474 over 10 splits
+subject 18, avg accuracy 0.7412280738353729/0.2814285719820431 over 10 splits
+subject 19, avg accuracy 0.751169604063034/0.3274725278409628 over 10 splits
+avg accuracy over all subjects 0.7798326861527232/0.3485691255715062
+subject 1, avg accuracy 0.7131578981876373/0.3044444462988112 over 10 splits
+subject 2, avg accuracy 0.7385964930057526/0.42027027115628524 over 10 splits
+subject 3, avg accuracy 0.8608187139034271/0.35000000000000003 over 10 splits
+subject 4, avg accuracy 0.7894736945629119/0.39999999999999997 over 10 splits
+subject 5, avg accuracy 0.8403508782386779/0.3412844039431405 over 10 splits
+subject 6, avg accuracy 0.7415204703807831/0.34628099192026224 over 10 splits
+subject 7, avg accuracy 0.6704678416252137/0.3436781604485265 over 10 splits
+subject 8, avg accuracy 0.7684210479259491/0.37168141938416305 over 10 splits
+subject 9, avg accuracy 0.7804093599319458/0.29277108476822633 over 10 splits
+subject 11, avg accuracy 0.7739766061305999/0.3551020408163265 over 10 splits
+subject 12, avg accuracy 0.7684210658073425/0.2705263137503674 over 10 splits
+subject 13, avg accuracy 0.7926900684833527/0.34070796574902745 over 10 splits
+subject 14, avg accuracy 0.7639473736286163/0.4243243248076052 over 10 splits
+subject 15, avg accuracy 0.7850877165794372/0.3199999997615814 over 10 splits
+subject 16, avg accuracy 0.7355263233184814/0.39838710206170236 over 10 splits
+subject 17, avg accuracy 0.7210526287555694/0.33970588235294125 over 10 splits
+subject 18, avg accuracy 0.8163742661476135/0.29857142933777403 over 10 splits
+subject 19, avg accuracy 0.7736842095851898/0.30549450495413366 over 10 splits
+avg accuracy over all subjects 0.7685542586776944/0.3457350189728264
+subject 1, avg accuracy 0.7725146234035491/0.3244444468286302 over 10 splits
+subject 2, avg accuracy 0.7654970705509185/0.37162162274927707 over 10 splits
+subject 3, avg accuracy 0.8502923965454101/0.3461538461538462 over 10 splits
+subject 4, avg accuracy 0.772222226858139/0.3770833333333333 over 10 splits
+subject 5, avg accuracy 0.8406432807445526/0.35321100984418063 over 10 splits
+subject 6, avg accuracy 0.7555555582046509/0.33966942151223334 over 10 splits
+subject 7, avg accuracy 0.7020467907190323/0.3528735617454025 over 10 splits
+subject 8, avg accuracy 0.7421052575111389/0.3522123925190056 over 10 splits
+subject 9, avg accuracy 0.7692982524633407/0.29638554239308973 over 10 splits
+subject 11, avg accuracy 0.7959064364433288/0.33571428571428574 over 10 splits
+subject 12, avg accuracy 0.7631578862667083/0.2873684188880418 over 10 splits
+subject 13, avg accuracy 0.7383041024208069/0.3424778776358715 over 10 splits
+subject 14, avg accuracy 0.7328947424888611/0.4337837847503456 over 10 splits
+subject 15, avg accuracy 0.8181286454200745/0.285600000834465 over 10 splits
+subject 16, avg accuracy 0.7821052670478821/0.36129032815656353 over 10 splits
+subject 17, avg accuracy 0.7578947365283966/0.33529411764705885 over 10 splits
+subject 18, avg accuracy 0.740350878238678/0.29571428614003314 over 10 splits
+subject 19, avg accuracy 0.7733918190002441/0.3065934056927869 over 10 splits
+avg accuracy over all subjects 0.7706838872697618/0.33874953791880286
+subject 1, avg accuracy 0.7722222208976746/0.3211111124356588 over 10 splits
+subject 2, avg accuracy 0.6681286573410035/0.46216216248434944 over 10 splits
+subject 3, avg accuracy 0.8663742661476135/0.35769230769230775 over 10 splits
+subject 4, avg accuracy 0.7622807085514068/0.34479166666666666 over 10 splits
+subject 5, avg accuracy 0.8511695981025695/0.3366972481302165 over 10 splits
+subject 6, avg accuracy 0.7555555582046509/0.34049586765775997 over 10 splits
+subject 7, avg accuracy 0.7342105269432068/0.29425287178193016 over 10 splits
+subject 8, avg accuracy 0.768421059846878/0.3584070831800984 over 10 splits
+subject 9, avg accuracy 0.7897660911083222/0.3518072279461895 over 10 splits
+subject 11, avg accuracy 0.7140350848436355/0.34591836734693876 over 10 splits
+subject 12, avg accuracy 0.7631578981876374/0.293684207671567 over 10 splits
+subject 13, avg accuracy 0.7771929919719696/0.32654867387187164 over 10 splits
+subject 14, avg accuracy 0.759736829996109/0.4391891900752042 over 10 splits
+subject 15, avg accuracy 0.7903508722782135/0.3000000000834465 over 10 splits
+subject 16, avg accuracy 0.7457894802093505/0.406451616796755 over 10 splits
+subject 17, avg accuracy 0.7736842095851898/0.35294117647058826 over 10 splits
+subject 18, avg accuracy 0.7842105209827424/0.2814285718543189 over 10 splits
+subject 19, avg accuracy 0.7669590592384339/0.3307692301633594 over 10 splits
+avg accuracy over all subjects 0.7690692019131448/0.34690825457273483
+subject 1, avg accuracy 0.7561403512954712/0.34000000135766134 over 10 splits
+subject 2, avg accuracy 0.7269005894660949/0.460810812019013 over 10 splits
+subject 3, avg accuracy 0.838304090499878/0.36076923076923084 over 10 splits
+subject 4, avg accuracy 0.7511695921421051/0.36666666666666664 over 10 splits
+subject 5, avg accuracy 0.8666666746139526/0.32752293676411337 over 10 splits
+subject 6, avg accuracy 0.7514619827270508/0.3297520661895925 over 10 splits
+subject 7, avg accuracy 0.6964912325143814/0.3022988496155574 over 10 splits
+subject 8, avg accuracy 0.8157894790172577/0.3619469066109277 over 10 splits
+subject 9, avg accuracy 0.833625727891922/0.36506023999438225 over 10 splits
+subject 11, avg accuracy 0.7464912295341491/0.36938775510204075 over 10 splits
+subject 12, avg accuracy 0.7842105209827424/0.2968421028789721 over 10 splits
+subject 13, avg accuracy 0.7605263233184815/0.3424778783347754 over 10 splits
+subject 14, avg accuracy 0.7273684322834015/0.4229729735770741 over 10 splits
+subject 15, avg accuracy 0.7736842036247253/0.30399999905824665 over 10 splits
+subject 16, avg accuracy 0.7510526418685913/0.43709677654889323 over 10 splits
+subject 17, avg accuracy 0.768421059846878/0.325 over 10 splits
+subject 18, avg accuracy 0.7040935635566712/0.31428571479661127 over 10 splits
+subject 19, avg accuracy 0.7783625572919846/0.32527472473435354 over 10 splits
+avg accuracy over all subjects 0.7683755695819855/0.35289809083433954
+subject 1, avg accuracy 0.7350877225399017/0.34111111392577487 over 10 splits
+subject 2, avg accuracy 0.7491228103637695/0.4297297310184788 over 10 splits
+subject 3, avg accuracy 0.8546783626079559/0.34461538461538466 over 10 splits
+subject 4, avg accuracy 0.7938596487045289/0.4104166666666666 over 10 splits
+subject 5, avg accuracy 0.8830409348011017/0.3082568814174844 over 10 splits
+subject 6, avg accuracy 0.7456140398979187/0.35371900803663514 over 10 splits
+subject 7, avg accuracy 0.6763157963752746/0.2747126426676224 over 10 splits
+subject 8, avg accuracy 0.7842105209827424/0.3734513301501232 over 10 splits
+subject 9, avg accuracy 0.8438596487045288/0.35421686786484996 over 10 splits
+subject 11, avg accuracy 0.7739766091108322/0.3846938775510204 over 10 splits
+subject 12, avg accuracy 0.7684210658073425/0.27789473433243594 over 10 splits
+subject 13, avg accuracy 0.7497075974941254/0.3513274350393135 over 10 splits
+subject 14, avg accuracy 0.7431578934192657/0.4581081087524826 over 10 splits
+subject 15, avg accuracy 0.79619882106781/0.3071999996304512 over 10 splits
+subject 16, avg accuracy 0.7971052706241608/0.41451613335840165 over 10 splits
+subject 17, avg accuracy 0.7052631556987763/0.33676470588235297 over 10 splits
+subject 18, avg accuracy 0.747076016664505/0.2885714289546013 over 10 splits
+subject 19, avg accuracy 0.7073099374771118/0.31208791228441085 over 10 splits
+avg accuracy over all subjects 0.7696669917967585/0.3511885534526939
+subject 1, avg accuracy 0.728947377204895/0.3388888916042116 over 10 splits
+subject 2, avg accuracy 0.7277777761220932/0.42162162266873027 over 10 splits
+subject 3, avg accuracy 0.8444444417953492/0.34846153846153843 over 10 splits
+subject 4, avg accuracy 0.7728070318698883/0.375 over 10 splits
+subject 5, avg accuracy 0.8780701816082/0.33211009248134193 over 10 splits
+subject 6, avg accuracy 0.750877195596695/0.3628099193257734 over 10 splits
+subject 7, avg accuracy 0.6593567252159118/0.2931034468200015 over 10 splits
+subject 8, avg accuracy 0.7947368502616883/0.36460177312910036 over 10 splits
+subject 9, avg accuracy 0.7690058648586273/0.3506024094949286 over 10 splits
+subject 11, avg accuracy 0.7742690086364746/0.3561224489795918 over 10 splits
+subject 12, avg accuracy 0.7842105388641357/0.2936842080480174 over 10 splits
+subject 13, avg accuracy 0.7985380172729493/0.31769911571677806 over 10 splits
+subject 14, avg accuracy 0.764473682641983/0.42027027091464486 over 10 splits
+subject 15, avg accuracy 0.7795321643352509/0.2928000001430511 over 10 splits
+subject 16, avg accuracy 0.7350000023841858/0.36774193966580976 over 10 splits
+subject 17, avg accuracy 0.7210526436567306/0.32352941176470595 over 10 splits
+subject 18, avg accuracy 0.7850877106189728/0.26571428622518267 over 10 splits
+subject 19, avg accuracy 0.7289473712444305/0.3109890115621326 over 10 splits
+avg accuracy over all subjects 0.7665074768993589/0.34087502150030774
+subject 1, avg accuracy 0.7345029234886169/0.30555555827087827 over 10 splits
+subject 2, avg accuracy 0.7491228103637695/0.4540540550004792 over 10 splits
+subject 3, avg accuracy 0.8704678297042847/0.3638461538461539 over 10 splits
+subject 4, avg accuracy 0.7573099493980407/0.4125 over 10 splits
+subject 5, avg accuracy 0.8619883060455322/0.3183486242770055 over 10 splits
+subject 6, avg accuracy 0.7488304197788238/0.33884297642579747 over 10 splits
+subject 7, avg accuracy 0.6801169514656067/0.2931034470255347 over 10 splits
+subject 8, avg accuracy 0.7578947305679321/0.3769911537919425 over 10 splits
+subject 9, avg accuracy 0.7959064304828644/0.3313253010611936 over 10 splits
+subject 11, avg accuracy 0.7578947365283966/0.35918367346938773 over 10 splits
+subject 12, avg accuracy 0.778947377204895/0.31052631331117525 over 10 splits
+subject 13, avg accuracy 0.7593567252159119/0.3637168152669889 over 10 splits
+subject 14, avg accuracy 0.7223684251308441/0.4364864869697674 over 10 splits
+subject 15, avg accuracy 0.7733918070793152/0.3000000001430511 over 10 splits
+subject 16, avg accuracy 0.7560526311397553/0.34193548838938437 over 10 splits
+subject 17, avg accuracy 0.7736842155456543/0.3661764705882353 over 10 splits
+subject 18, avg accuracy 0.8111111104488373/0.24285714332546507 over 10 splits
+subject 19, avg accuracy 0.7456140458583832/0.312087912431785 over 10 splits
+avg accuracy over all subjects 0.7685867458581925/0.34597430964412357
+subject 1, avg accuracy 0.6912280678749084/0.31444444696108503 over 10 splits
+subject 2, avg accuracy 0.7540935695171356/0.4162162173438717 over 10 splits
+subject 3, avg accuracy 0.8769005835056305/0.3792307692307692 over 10 splits
+subject 4, avg accuracy 0.7780701756477356/0.38958333333333334 over 10 splits
+subject 5, avg accuracy 0.8292397618293762/0.32752293642234365 over 10 splits
+subject 6, avg accuracy 0.7178362548351288/0.32892561969924566 over 10 splits
+subject 7, avg accuracy 0.7076023340225219/0.2954022971377976 over 10 splits
+subject 8, avg accuracy 0.7421052634716034/0.3274336304021093 over 10 splits
+subject 9, avg accuracy 0.817251467704773/0.30240963812333993 over 10 splits
+subject 11, avg accuracy 0.7242690175771713/0.36428571428571427 over 10 splits
+subject 12, avg accuracy 0.7526315808296203/0.2673684179782867 over 10 splits
+subject 13, avg accuracy 0.7929824650287628/0.32566371806691186 over 10 splits
+subject 14, avg accuracy 0.7176315784454346/0.4513513520359993 over 10 splits
+subject 15, avg accuracy 0.806725138425827/0.30159999941587456 over 10 splits
+subject 16, avg accuracy 0.7607894718647004/0.39354839214394166 over 10 splits
+subject 17, avg accuracy 0.721052634716034/0.35147058823529415 over 10 splits
+subject 18, avg accuracy 0.7520467817783356/0.2871428577389036 over 10 splits
+subject 19, avg accuracy 0.7178362607955933/0.29450549427624584 over 10 splits
+avg accuracy over all subjects 0.758905133770572/0.33989474571283707
+subject 1, avg accuracy 0.7242690086364746/0.32888889036244817 over 10 splits
+subject 2, avg accuracy 0.7166666686534882/0.4013513519957259 over 10 splits
+subject 3, avg accuracy 0.8280701816082001/0.3792307692307692 over 10 splits
+subject 4, avg accuracy 0.7842105150222778/0.4135416666666667 over 10 splits
+subject 5, avg accuracy 0.8450292348861694/0.33853211077528267 over 10 splits
+subject 6, avg accuracy 0.6745614111423492/0.3181818186128435 over 10 splits
+subject 7, avg accuracy 0.7175438582897187/0.31724137792299534 over 10 splits
+subject 8, avg accuracy 0.8052631616592407/0.3513274367404195 over 10 splits
+subject 9, avg accuracy 0.8219298362731934/0.35903614490147095 over 10 splits
+subject 11, avg accuracy 0.8073099493980408/0.35918367346938773 over 10 splits
+subject 12, avg accuracy 0.778947377204895/0.2936842078911631 over 10 splits
+subject 13, avg accuracy 0.7877193033695221/0.337168142832486 over 10 splits
+subject 14, avg accuracy 0.790263158082962/0.4256756765616907 over 10 splits
+subject 15, avg accuracy 0.7730994105339051/0.37279999979734424 over 10 splits
+subject 16, avg accuracy 0.7760526359081268/0.36774194038683367 over 10 splits
+subject 17, avg accuracy 0.7473684191703797/0.30294117647058827 over 10 splits
+subject 18, avg accuracy 0.778947365283966/0.295714286182608 over 10 splits
+subject 19, avg accuracy 0.7786549746990203/0.34835164826977383 over 10 splits
+avg accuracy over all subjects 0.7742170261012183/0.3505884621705831
+subject 1, avg accuracy 0.7192982494831085/0.3433333357837465 over 10 splits
+subject 2, avg accuracy 0.7/0.4459459471541482 over 10 splits
+subject 3, avg accuracy 0.818421047925949/0.3769230769230769 over 10 splits
+subject 4, avg accuracy 0.7880116999149323/0.428125 over 10 splits
+subject 5, avg accuracy 0.8140350878238678/0.30091743162329043 over 10 splits
+subject 6, avg accuracy 0.7897660791873932/0.33553719082154515 over 10 splits
+subject 7, avg accuracy 0.712573105096817/0.32068965435028074 over 10 splits
+subject 8, avg accuracy 0.778947365283966/0.36017699399880604 over 10 splits
+subject 9, avg accuracy 0.7950292468070984/0.3253012037600379 over 10 splits
+subject 11, avg accuracy 0.7736842125654221/0.336734693877551 over 10 splits
+subject 12, avg accuracy 0.7736842155456543/0.27894736600549597 over 10 splits
+subject 13, avg accuracy 0.7976608335971832/0.3460177003809837 over 10 splits
+subject 14, avg accuracy 0.7897368431091308/0.4175675684938559 over 10 splits
+subject 15, avg accuracy 0.8175438642501831/0.3287999999642372 over 10 splits
+subject 16, avg accuracy 0.7657894790172577/0.38870968213004453 over 10 splits
+subject 17, avg accuracy 0.800000011920929/0.31911764705882356 over 10 splits
+subject 18, avg accuracy 0.8225146234035492/0.34571428626775746 over 10 splits
+subject 19, avg accuracy 0.7450292348861695/0.3208791205679978 over 10 splits
+avg accuracy over all subjects 0.7778736222121451/0.3510798832867599
+subject 1, avg accuracy 0.6804093599319458/0.3288888917035527 over 10 splits
+subject 2, avg accuracy 0.7216374337673187/0.46216216272598987 over 10 splits
+subject 3, avg accuracy 0.8763157844543457/0.3492307692307693 over 10 splits
+subject 4, avg accuracy 0.7611111223697662/0.3239583333333333 over 10 splits
+subject 5, avg accuracy 0.824561408162117/0.3348623861960315 over 10 splits
+subject 6, avg accuracy 0.7842105209827424/0.3479338851718864 over 10 splits
+subject 7, avg accuracy 0.7555555522441864/0.33793103383190337 over 10 splits
+subject 8, avg accuracy 0.7736842215061188/0.3530973486668241 over 10 splits
+subject 9, avg accuracy 0.8064327538013458/0.3048192773238722 over 10 splits
+subject 11, avg accuracy 0.7517543911933899/0.33571428571428574 over 10 splits
+subject 12, avg accuracy 0.7842105329036713/0.31999999745895985 over 10 splits
+subject 13, avg accuracy 0.8131578981876373/0.3132743373117616 over 10 splits
+subject 14, avg accuracy 0.7584210515022278/0.4432432439681646 over 10 splits
+subject 15, avg accuracy 0.7956140339374542/0.3127999996781349 over 10 splits
+subject 16, avg accuracy 0.7297368347644806/0.41451613364681117 over 10 splits
+subject 17, avg accuracy 0.7631579041481018/0.35294117647058826 over 10 splits
+subject 18, avg accuracy 0.7090643227100373/0.3071428576111794 over 10 splits
+subject 19, avg accuracy 0.7005847990512848/0.32637362568588046 over 10 splits
+avg accuracy over all subjects 0.7660899958676762/0.34827165254055154
+subject 1, avg accuracy 0.7192982494831085/0.3033333352373706 over 10 splits
+subject 2, avg accuracy 0.7002923965454102/0.38918919055848505 over 10 splits
+subject 3, avg accuracy 0.8385964930057526/0.3853846153846153 over 10 splits
+subject 4, avg accuracy 0.7728070199489594/0.38020833333333337 over 10 splits
+subject 5, avg accuracy 0.8561403512954712/0.35045871618417423 over 10 splits
+subject 6, avg accuracy 0.7128655046224595/0.3694214883668364 over 10 splits
+subject 7, avg accuracy 0.7222222328186035/0.3218390800315758 over 10 splits
+subject 8, avg accuracy 0.7473684191703797/0.3725663743979108 over 10 splits
+subject 9, avg accuracy 0.8181286573410034/0.30481927667755676 over 10 splits
+subject 11, avg accuracy 0.7538011610507965/0.33061224489795915 over 10 splits
+subject 12, avg accuracy 0.7631578981876374/0.30842105015328053 over 10 splits
+subject 13, avg accuracy 0.776900589466095/0.32389380647017896 over 10 splits
+subject 14, avg accuracy 0.7797368407249451/0.4445945953597894 over 10 splits
+subject 15, avg accuracy 0.823099410533905/0.3456000001311302 over 10 splits
+subject 16, avg accuracy 0.7715789437294006/0.3612903282527001 over 10 splits
+subject 17, avg accuracy 0.7842105388641357/0.3455882352941177 over 10 splits
+subject 18, avg accuracy 0.7643274784088134/0.2500000004683222 over 10 splits
+subject 19, avg accuracy 0.7780701756477356/0.3142857144330884 over 10 splits
+avg accuracy over all subjects 0.7712556867135896/0.3445281325351347
+subject 1, avg accuracy 0.7447368443012238/0.317777780228191 over 10 splits
+subject 2, avg accuracy 0.7476608276367187/0.40000000096656185 over 10 splits
+subject 3, avg accuracy 0.806725150346756/0.35461538461538467 over 10 splits
+subject 4, avg accuracy 0.8108187139034271/0.3895833333333333 over 10 splits
+subject 5, avg accuracy 0.8497076034545898/0.3385321104471837 over 10 splits
+subject 6, avg accuracy 0.7877192974090577/0.3644628101390255 over 10 splits
+subject 7, avg accuracy 0.7175438642501831/0.3022988491702354 over 10 splits
+subject 8, avg accuracy 0.7578947424888611/0.3725663748462643 over 10 splits
+subject 9, avg accuracy 0.7631578952074051/0.32409638450088274 over 10 splits
+subject 11, avg accuracy 0.7526315808296203/0.3530612244897959 over 10 splits
+subject 12, avg accuracy 0.7894736915826798/0.3136842078284213 over 10 splits
+subject 13, avg accuracy 0.7970760285854339/0.3274336291361699 over 10 splits
+subject 14, avg accuracy 0.7544736862182617/0.41486486569046976 over 10 splits
+subject 15, avg accuracy 0.8181286513805389/0.36159999970197676 over 10 splits
+subject 16, avg accuracy 0.7402631640434265/0.4129032309016874 over 10 splits
+subject 17, avg accuracy 0.7684210538864136/0.3588235294117647 over 10 splits
+subject 18, avg accuracy 0.7637426853179932/0.29285714324031564 over 10 splits
+subject 19, avg accuracy 0.7616959095001221/0.31648351559927174 over 10 splits
+avg accuracy over all subjects 0.7739928550190396/0.35086913190260743
+subject 1, avg accuracy 0.7078947305679322/0.33333333641290663 over 10 splits
+subject 2, avg accuracy 0.7125730991363526/0.44189189269736007 over 10 splits
+subject 3, avg accuracy 0.8660818755626678/0.35076923076923083 over 10 splits
+subject 4, avg accuracy 0.8000000059604645/0.36666666666666664 over 10 splits
+subject 5, avg accuracy 0.8725146114826202/0.32660550476487626 over 10 splits
+subject 6, avg accuracy 0.7397660851478577/0.3512396694461176 over 10 splits
+subject 7, avg accuracy 0.6491228014230728/0.3172413786081062 over 10 splits
+subject 8, avg accuracy 0.8157894730567932/0.3610619499620083 over 10 splits
+subject 9, avg accuracy 0.7859649181365966/0.29277108362819776 over 10 splits
+subject 11, avg accuracy 0.77982457280159/0.3836734693877551 over 10 splits
+subject 12, avg accuracy 0.768421059846878/0.3052631555732928 over 10 splits
+subject 13, avg accuracy 0.7766081869602204/0.3619469039603672 over 10 splits
+subject 14, avg accuracy 0.7852631568908691/0.4378378387037161 over 10 splits
+subject 15, avg accuracy 0.7625730901956558/0.31520000004768367 over 10 splits
+subject 16, avg accuracy 0.8339473664760589/0.37258064987198 over 10 splits
+subject 17, avg accuracy 0.7368421077728271/0.3588235294117647 over 10 splits
+subject 18, avg accuracy 0.7511695981025696/0.2728571431977408 over 10 splits
+subject 19, avg accuracy 0.7116959095001221/0.3098901110363531 over 10 splits
+avg accuracy over all subjects 0.7697807027233972/0.3477585285636736
+subject 1, avg accuracy 0.6742690116167068/0.30777777953280344 over 10 splits
+subject 2, avg accuracy 0.7488304078578949/0.3891891903168446 over 10 splits
+subject 3, avg accuracy 0.8602339208126069/0.3361538461538462 over 10 splits
+subject 4, avg accuracy 0.7932748556137085/0.3822916666666667 over 10 splits
+subject 5, avg accuracy 0.8245614051818848/0.3229357805684072 over 10 splits
+subject 6, avg accuracy 0.778947365283966/0.36115702545839895 over 10 splits
+subject 7, avg accuracy 0.7178362637758255/0.314942527999138 over 10 splits
+subject 8, avg accuracy 0.7947368443012237/0.3663716844225352 over 10 splits
+subject 9, avg accuracy 0.7956140398979187/0.30120481943868727 over 10 splits
+subject 11, avg accuracy 0.7745613992214203/0.3663265306122449 over 10 splits
+subject 12, avg accuracy 0.7421052694320679/0.3357894707980909 over 10 splits
+subject 13, avg accuracy 0.7821637451648712/0.32743362962408407 over 10 splits
+subject 14, avg accuracy 0.7010526388883591/0.42702702740962445 over 10 splits
+subject 15, avg accuracy 0.7909356653690338/0.3319999996185302 over 10 splits
+subject 16, avg accuracy 0.803157901763916/0.4016129079364961 over 10 splits
+subject 17, avg accuracy 0.7789473712444306/0.3220588235294118 over 10 splits
+subject 18, avg accuracy 0.7847953230142594/0.2842857147114617 over 10 splits
+subject 19, avg accuracy 0.7251461952924728/0.2857142858616598 over 10 splits
+avg accuracy over all subjects 0.7706205346518094/0.3424595950366073
+subject 1, avg accuracy 0.766374272108078/0.3044444465637207 over 10 splits
+subject 2, avg accuracy 0.715497088432312/0.43513513602115017 over 10 splits
+subject 3, avg accuracy 0.8871345102787018/0.36 over 10 splits
+subject 4, avg accuracy 0.7938596427440643/0.41875 over 10 splits
+subject 5, avg accuracy 0.8611111104488373/0.36422018401256395 over 10 splits
+subject 6, avg accuracy 0.7400584757328034/0.32396694261673065 over 10 splits
+subject 7, avg accuracy 0.6435672551393509/0.32183907871273737 over 10 splits
+subject 8, avg accuracy 0.7684210538864136/0.34867256863982277 over 10 splits
+subject 9, avg accuracy 0.8277777850627899/0.36144578324024934 over 10 splits
+subject 11, avg accuracy 0.7792397618293763/0.3581632653061224 over 10 splits
+subject 12, avg accuracy 0.7421052634716034/0.31052631284061233 over 10 splits
+subject 13, avg accuracy 0.7713450253009796/0.31061947001556384 over 10 splits
+subject 14, avg accuracy 0.8060526371002197/0.45945945994274046 over 10 splits
+subject 15, avg accuracy 0.8292397558689117/0.3255999998688698 over 10 splits
+subject 16, avg accuracy 0.7713157892227173/0.3951612937834955 over 10 splits
+subject 17, avg accuracy 0.7052631676197052/0.35294117647058826 over 10 splits
+subject 18, avg accuracy 0.7578947305679321/0.29142857189689364 over 10 splits
+subject 19, avg accuracy 0.7289473712444305/0.29450549421074623 over 10 splits
+avg accuracy over all subjects 0.7719558164477348/0.35204884356347815
+subject 1, avg accuracy 0.7625730991363525/0.3388888916373253 over 10 splits
+subject 2, avg accuracy 0.7228070259094238/0.46216216288708356 over 10 splits
+subject 3, avg accuracy 0.8657894670963288/0.35000000000000003 over 10 splits
+subject 4, avg accuracy 0.7888888895511628/0.3614583333333333 over 10 splits
+subject 5, avg accuracy 0.8771929800510406/0.3073394502931779 over 10 splits
+subject 6, avg accuracy 0.7953216314315796/0.3247933887622573 over 10 splits
+subject 7, avg accuracy 0.6807017505168915/0.3241379292874501 over 10 splits
+subject 8, avg accuracy 0.8157894790172577/0.3469026581639737 over 10 splits
+subject 9, avg accuracy 0.7850877165794372/0.3096385546477444 over 10 splits
+subject 11, avg accuracy 0.8017543852329254/0.35816326530612247 over 10 splits
+subject 12, avg accuracy 0.778947365283966/0.2842105239316037 over 10 splits
+subject 13, avg accuracy 0.7812865555286408/0.3610619481422205 over 10 splits
+subject 14, avg accuracy 0.7744736850261689/0.4202702712771055 over 10 splits
+subject 15, avg accuracy 0.8067251443862915/0.3151999997615814 over 10 splits
+subject 16, avg accuracy 0.7402631640434265/0.39677419748998455 over 10 splits
+subject 17, avg accuracy 0.7842105269432068/0.36323529411764705 over 10 splits
+subject 18, avg accuracy 0.789473682641983/0.29285714328289025 over 10 splits
+subject 19, avg accuracy 0.7614035129547119/0.30109890126265004 over 10 splits
+avg accuracy over all subjects 0.7840383367405998/0.3454551618657861
+subject 1, avg accuracy 0.7233918130397796/0.32333333598242864 over 10 splits
+subject 2, avg accuracy 0.7543859660625458/0.3959459473152418 over 10 splits
+subject 3, avg accuracy 0.8605263233184814/0.37384615384615383 over 10 splits
+subject 4, avg accuracy 0.7511695921421051/0.39375 over 10 splits
+subject 5, avg accuracy 0.8616958975791931/0.3431192664104864 over 10 splits
+subject 6, avg accuracy 0.7719298303127289/0.345454546230391 over 10 splits
+subject 7, avg accuracy 0.7236842155456543/0.31034482589055745 over 10 splits
+subject 8, avg accuracy 0.7789473712444306/0.36991150761600083 over 10 splits
+subject 9, avg accuracy 0.8274853765964508/0.3421686738729477 over 10 splits
+subject 11, avg accuracy 0.7570175439119339/0.3224489795918367 over 10 splits
+subject 12, avg accuracy 0.7736842215061188/0.36315789159975553 over 10 splits
+subject 13, avg accuracy 0.8131579041481019/0.3398230102737393 over 10 splits
+subject 14, avg accuracy 0.8110526263713836/0.4337837843476115 over 10 splits
+subject 15, avg accuracy 0.8014619827270508/0.30319999969005573 over 10 splits
+subject 16, avg accuracy 0.7713157892227173/0.3806451655683979 over 10 splits
+subject 17, avg accuracy 0.7263157844543457/0.3411764705882353 over 10 splits
+subject 18, avg accuracy 0.7622806966304779/0.28571428609745836 over 10 splits
+subject 19, avg accuracy 0.717251455783844/0.31538461474599416 over 10 splits
+avg accuracy over all subjects 0.7770419105887414/0.3490671366481829
+subject 1, avg accuracy 0.6900584876537323/0.3222222238116794 over 10 splits
+subject 2, avg accuracy 0.7441520512104034/0.45000000068464796 over 10 splits
+subject 3, avg accuracy 0.8605263113975525/0.35769230769230775 over 10 splits
+subject 4, avg accuracy 0.8149122834205628/0.4020833333333334 over 10 splits
+subject 5, avg accuracy 0.8616959035396576/0.3366972480618626 over 10 splits
+subject 6, avg accuracy 0.7678362548351287/0.3289256198223957 over 10 splits
+subject 7, avg accuracy 0.654678362607956/0.293103447453729 over 10 splits
+subject 8, avg accuracy 0.7894736856222153/0.37522124223477016 over 10 splits
+subject 9, avg accuracy 0.7304093599319458/0.32048192720815366 over 10 splits
+subject 11, avg accuracy 0.7578947365283966/0.33571428571428574 over 10 splits
+subject 12, avg accuracy 0.789473682641983/0.31263157581028184 over 10 splits
+subject 13, avg accuracy 0.7970760285854339/0.3336283195467122 over 10 splits
+subject 14, avg accuracy 0.7431578934192657/0.4378378386835794 over 10 splits
+subject 15, avg accuracy 0.7845029234886169/0.33519999943971623 over 10 splits
+subject 16, avg accuracy 0.7773684322834015/0.3725806509294817 over 10 splits
+subject 17, avg accuracy 0.7315789520740509/0.33676470588235297 over 10 splits
+subject 18, avg accuracy 0.752046775817871/0.3071428574834551 over 10 splits
+subject 19, avg accuracy 0.728654968738556/0.33516483418234094 over 10 splits
+avg accuracy over all subjects 0.7653053940998182/0.34961624544306036
+subject 1, avg accuracy 0.7286549746990204/0.32333333601554237 over 10 splits
+subject 2, avg accuracy 0.7438596546649933/0.40945946058711497 over 10 splits
+subject 3, avg accuracy 0.833625727891922/0.3584615384615385 over 10 splits
+subject 4, avg accuracy 0.7497076034545899/0.38020833333333337 over 10 splits
+subject 5, avg accuracy 0.8827485382556916/0.31926605578409417 over 10 splits
+subject 6, avg accuracy 0.7555555522441864/0.3520661162935998 over 10 splits
+subject 7, avg accuracy 0.6912280648946763/0.3068965502682774 over 10 splits
+subject 8, avg accuracy 0.8000000059604645/0.3610619496718973 over 10 splits
+subject 9, avg accuracy 0.827777773141861/0.2903614454061152 over 10 splits
+subject 11, avg accuracy 0.7903508752584457/0.35816326530612247 over 10 splits
+subject 12, avg accuracy 0.768421059846878/0.30842105056110186 over 10 splits
+subject 13, avg accuracy 0.7923976600170135/0.3000000008703333 over 10 splits
+subject 14, avg accuracy 0.7113157957792282/0.4378378387238529 over 10 splits
+subject 15, avg accuracy 0.8292397558689117/0.3383999994397163 over 10 splits
+subject 16, avg accuracy 0.7510526359081269/0.3983871015329515 over 10 splits
+subject 17, avg accuracy 0.7105263054370881/0.32500000000000007 over 10 splits
+subject 18, avg accuracy 0.7742690086364746/0.2857142862251827 over 10 splits
+subject 19, avg accuracy 0.756725150346756/0.3230769223564274 over 10 splits
+avg accuracy over all subjects 0.7720808967947961/0.34311751393540013
+subject 1, avg accuracy 0.7286549746990204/0.34000000205304887 over 10 splits
+subject 2, avg accuracy 0.7377192974090576/0.4081081093163103 over 10 splits
+subject 3, avg accuracy 0.8923976600170136/0.37230769230769234 over 10 splits
+subject 4, avg accuracy 0.7786549746990203/0.4125 over 10 splits
+subject 5, avg accuracy 0.8391812860965728/0.36146789102926163 over 10 splits
+subject 6, avg accuracy 0.772222226858139/0.3231404960401788 over 10 splits
+subject 7, avg accuracy 0.7184210509061814/0.3022988494614075 over 10 splits
+subject 8, avg accuracy 0.7473684310913086/0.34867256966839844 over 10 splits
+subject 9, avg accuracy 0.7845029234886169/0.3012048190078104 over 10 splits
+subject 11, avg accuracy 0.7687134444713593/0.35 over 10 splits
+subject 12, avg accuracy 0.7736842095851898/0.2968421026280052 over 10 splits
+subject 13, avg accuracy 0.8347953259944916/0.30973451435565946 over 10 splits
+subject 14, avg accuracy 0.7539473652839661/0.42567567652141725 over 10 splits
+subject 15, avg accuracy 0.7956140339374542/0.31759999917745585 over 10 splits
+subject 16, avg accuracy 0.7252631604671478/0.3435483928649656 over 10 splits
+subject 17, avg accuracy 0.7526315867900848/0.34411764705882353 over 10 splits
+subject 18, avg accuracy 0.8002924025058746/0.2971428575686046 over 10 splits
+subject 19, avg accuracy 0.7725146234035491/0.3648351652281625 over 10 splits
+avg accuracy over all subjects 0.776476609872447/0.34551093246040016
+subject 1, avg accuracy 0.6862573027610779/0.33111111379332014 over 10 splits
+subject 2, avg accuracy 0.7318713426589966/0.43378378450870514 over 10 splits
+subject 3, avg accuracy 0.8383041024208069/0.3407692307692308 over 10 splits
+subject 4, avg accuracy 0.7827485382556916/0.35833333333333334 over 10 splits
+subject 5, avg accuracy 0.8505847930908204/0.3376146796509761 over 10 splits
+subject 6, avg accuracy 0.7064327448606491/0.3545454554198202 over 10 splits
+subject 7, avg accuracy 0.6912280738353729/0.3551724115836209 over 10 splits
+subject 8, avg accuracy 0.7368421137332917/0.374336285559477 over 10 splits
+subject 9, avg accuracy 0.8222222268581391/0.33975903636001675 over 10 splits
+subject 11, avg accuracy 0.7748538017272949/0.39183673469387753 over 10 splits
+subject 12, avg accuracy 0.7157894790172576/0.2936842079539048 over 10 splits
+subject 13, avg accuracy 0.7602339327335358/0.3159292043705958 over 10 splits
+subject 14, avg accuracy 0.7697368383407592/0.45810810899412313 over 10 splits
+subject 15, avg accuracy 0.8678362607955933/0.33040000079870224 over 10 splits
+subject 16, avg accuracy 0.7868421137332916/0.3983871016771562 over 10 splits
+subject 17, avg accuracy 0.7894736886024475/0.33235294117647063 over 10 splits
+subject 18, avg accuracy 0.7514619886875152/0.25285714341061455 over 10 splits
+subject 19, avg accuracy 0.7230994164943695/0.29340659302997063 over 10 splits
+avg accuracy over all subjects 0.7658788199226061/0.3495770759491064
+subject 1, avg accuracy 0.746198832988739/0.3433333365122477 over 10 splits
+subject 2, avg accuracy 0.7011695921421051/0.4148648658717001 over 10 splits
+subject 3, avg accuracy 0.806725150346756/0.3407692307692308 over 10 splits
+subject 4, avg accuracy 0.8002924025058746/0.3885416666666667 over 10 splits
+subject 5, avg accuracy 0.8301169574260712/0.3357798173955274 over 10 splits
+subject 6, avg accuracy 0.7190058469772339/0.3636363639688689 over 10 splits
+subject 7, avg accuracy 0.7064327597618103/0.2816091942376104 over 10 splits
+subject 8, avg accuracy 0.8052631616592407/0.34513274689691253 over 10 splits
+subject 9, avg accuracy 0.8166666686534881/0.31927710861326697 over 10 splits
+subject 11, avg accuracy 0.8073099374771118/0.3704081632653061 over 10 splits
+subject 12, avg accuracy 0.7842105329036713/0.2747368398779317 over 10 splits
+subject 13, avg accuracy 0.7657894790172577/0.3513274347755761 over 10 splits
+subject 14, avg accuracy 0.7328947424888611/0.38243243303653357 over 10 splits
+subject 15, avg accuracy 0.7733918070793152/0.2888000000476837 over 10 splits
+subject 16, avg accuracy 0.7821052551269532/0.38387097216421556 over 10 splits
+subject 17, avg accuracy 0.7473684191703797/0.3264705882352942 over 10 splits
+subject 18, avg accuracy 0.7681286573410034/0.29000000046832225 over 10 splits
+subject 19, avg accuracy 0.728947377204895/0.29450549448911956 over 10 splits
+avg accuracy over all subjects 0.7678898655705982/0.33863868096066746
+subject 1, avg accuracy 0.7459064364433289/0.32888889127307464 over 10 splits
+subject 2, avg accuracy 0.705847954750061/0.4256756764811439 over 10 splits
+subject 3, avg accuracy 0.8222222328186035/0.3769230769230769 over 10 splits
+subject 4, avg accuracy 0.7947368502616883/0.36770833333333336 over 10 splits
+subject 5, avg accuracy 0.8511695861816406/0.32477064285119744 over 10 splits
+subject 6, avg accuracy 0.7309941560029983/0.37685950392287626 over 10 splits
+subject 7, avg accuracy 0.6976608157157898/0.3275862052180301 over 10 splits
+subject 8, avg accuracy 0.7578947484493256/0.3681415960852024 over 10 splits
+subject 9, avg accuracy 0.8175438642501831/0.3192771084157818 over 10 splits
+subject 11, avg accuracy 0.7798245549201965/0.33775510204081627 over 10 splits
+subject 12, avg accuracy 0.7526315867900848/0.31157894463915575 over 10 splits
+subject 13, avg accuracy 0.7877192974090577/0.3362831866846675 over 10 splits
+subject 14, avg accuracy 0.7431578934192657/0.40270270358871774 over 10 splits
+subject 15, avg accuracy 0.7792397618293763/0.34159999870061875 over 10 splits
+subject 16, avg accuracy 0.7610526442527771/0.3887096822742493 over 10 splits
+subject 17, avg accuracy 0.7578947365283966/0.35294117647058826 over 10 splits
+subject 18, avg accuracy 0.7631578862667083/0.3185714292100498 over 10 splits
+subject 19, avg accuracy 0.7564327538013458/0.29780219814607073 over 10 splits
+avg accuracy over all subjects 0.7669493200050459/0.350209747569925
+subject 1, avg accuracy 0.7403508841991424/0.3344444454047416 over 10 splits
+subject 2, avg accuracy 0.7225146174430848/0.40810810915521667 over 10 splits
+subject 3, avg accuracy 0.8713450253009796/0.35769230769230775 over 10 splits
+subject 4, avg accuracy 0.7780701756477356/0.371875 over 10 splits
+subject 5, avg accuracy 0.8728070199489594/0.29266055084149767 over 10 splits
+subject 6, avg accuracy 0.7242690086364746/0.32892562031499606 over 10 splits
+subject 7, avg accuracy 0.7236842155456543/0.32643678051301805 over 10 splits
+subject 8, avg accuracy 0.7578947365283966/0.35752212769162345 over 10 splits
+subject 9, avg accuracy 0.8277777671813965/0.3337349408541817 over 10 splits
+subject 11, avg accuracy 0.747076028585434/0.386734693877551 over 10 splits
+subject 12, avg accuracy 0.7157894790172576/0.2863157867757897 over 10 splits
+subject 13, avg accuracy 0.7970760345458985/0.31681416003050006 over 10 splits
+subject 14, avg accuracy 0.7692105352878571/0.4378378400931487 over 10 splits
+subject 15, avg accuracy 0.8067251443862915/0.3407999994516372 over 10 splits
+subject 16, avg accuracy 0.7815789461135865/0.4064516171332328 over 10 splits
+subject 17, avg accuracy 0.7631578922271729/0.3235294117647059 over 10 splits
+subject 18, avg accuracy 0.7529239684343338/0.2714285717691694 over 10 splits
+subject 19, avg accuracy 0.7728070139884948/0.2648351640000448 over 10 splits
+avg accuracy over all subjects 0.7736143607232308/0.3414526181868535
+subject 1, avg accuracy 0.7350877165794373/0.3166666691336367 over 10 splits
+subject 2, avg accuracy 0.7441520512104034/0.39864864985685095 over 10 splits
+subject 3, avg accuracy 0.8292397677898407/0.36230769230769233 over 10 splits
+subject 4, avg accuracy 0.7947368443012237/0.378125 over 10 splits
+subject 5, avg accuracy 0.8771929800510406/0.333027523441599 over 10 splits
+subject 6, avg accuracy 0.7286549627780914/0.36446281040995576 over 10 splits
+subject 7, avg accuracy 0.766374272108078/0.3528735622763634 over 10 splits
+subject 8, avg accuracy 0.7789473712444306/0.3592920386685734 over 10 splits
+subject 9, avg accuracy 0.8330409407615662/0.3096385551504342 over 10 splits
+subject 11, avg accuracy 0.7076023399829865/0.3408163265306122 over 10 splits
+subject 12, avg accuracy 0.7315789520740509/0.2905263134052879 over 10 splits
+subject 13, avg accuracy 0.7923976659774781/0.31415929323540326 over 10 splits
+subject 14, avg accuracy 0.764473694562912/0.39324324463267585 over 10 splits
+subject 15, avg accuracy 0.7900584816932679/0.3231999993801117 over 10 splits
+subject 16, avg accuracy 0.7815789580345154/0.3822580680731804 over 10 splits
+subject 17, avg accuracy 0.7473684251308441/0.3397058823529412 over 10 splits
+subject 18, avg accuracy 0.795029240846634/0.3100000007237707 over 10 splits
+subject 19, avg accuracy 0.7947368443012237/0.3230769230605482 over 10 splits
+avg accuracy over all subjects 0.7773473060793348/0.3440015862577577
+subject 1, avg accuracy 0.7514619827270508/0.31000000135766137 over 10 splits
+subject 2, avg accuracy 0.7380116939544678/0.404054054940069 over 10 splits
+subject 3, avg accuracy 0.8552631556987762/0.3430769230769231 over 10 splits
+subject 4, avg accuracy 0.7561403572559356/0.38750000000000007 over 10 splits
+subject 5, avg accuracy 0.8771929860115051/0.3256880737772775 over 10 splits
+subject 6, avg accuracy 0.7461988210678101/0.344628099616894 over 10 splits
+subject 7, avg accuracy 0.6654970735311508/0.3425287346730287 over 10 splits
+subject 8, avg accuracy 0.8157894730567932/0.3513274373733891 over 10 splits
+subject 9, avg accuracy 0.7842105329036713/0.3072289159499019 over 10 splits
+subject 11, avg accuracy 0.7850877165794372/0.3438775510204081 over 10 splits
+subject 12, avg accuracy 0.7947368502616883/0.29473683987793164 over 10 splits
+subject 13, avg accuracy 0.7710526406764984/0.3371681427929254 over 10 splits
+subject 14, avg accuracy 0.7586842119693756/0.42567567623950336 over 10 splits
+subject 15, avg accuracy 0.8125730872154235/0.32959999855756755 over 10 splits
+subject 16, avg accuracy 0.7605263113975524/0.39838710201363403 over 10 splits
+subject 17, avg accuracy 0.7052631497383117/0.36176470588235293 over 10 splits
+subject 18, avg accuracy 0.6780701756477356/0.2757142863103321 over 10 splits
+subject 19, avg accuracy 0.7339181244373322/0.3065934063969077 over 10 splits
+avg accuracy over all subjects 0.7660932413405841/0.34386388610315044
+subject 1, avg accuracy 0.713450300693512/0.3533333362473382 over 10 splits
+subject 2, avg accuracy 0.7485380113124848/0.3972972981027654 over 10 splits
+subject 3, avg accuracy 0.8719298243522644/0.37923076923076926 over 10 splits
+subject 4, avg accuracy 0.7950292527675629/0.403125 over 10 splits
+subject 5, avg accuracy 0.8403508722782135/0.35871559653533713 over 10 splits
+subject 6, avg accuracy 0.7345029234886169/0.34793388375566026 over 10 splits
+subject 7, avg accuracy 0.6494152069091796/0.3160919525842557 over 10 splits
+subject 8, avg accuracy 0.7578947424888611/0.35840708238888636 over 10 splits
+subject 9, avg accuracy 0.8046783685684205/0.30361445741840154 over 10 splits
+subject 11, avg accuracy 0.7631578981876374/0.41836734693877553 over 10 splits
+subject 12, avg accuracy 0.7736842095851898/0.30947368179496965 over 10 splits
+subject 13, avg accuracy 0.7447368502616882/0.3460177006579078 over 10 splits
+subject 14, avg accuracy 0.7536842107772828/0.4554054064122406 over 10 splits
+subject 15, avg accuracy 0.8067251443862915/0.2887999994158745 over 10 splits
+subject 16, avg accuracy 0.8236842155456543/0.3935483913267812 over 10 splits
+subject 17, avg accuracy 0.7473684191703797/0.3308823529411765 over 10 splits
+subject 18, avg accuracy 0.7301169633865356/0.2928571433254651 over 10 splits
+subject 19, avg accuracy 0.7558479487895966/0.30769230708643625 over 10 splits
+avg accuracy over all subjects 0.7674886312749652/0.3533774281201689
+subject 1, avg accuracy 0.6804093599319458/0.3044444459511174 over 10 splits
+subject 2, avg accuracy 0.7108187198638916/0.42432432504924567 over 10 splits
+subject 3, avg accuracy 0.8824561357498169/0.3592307692307693 over 10 splits
+subject 4, avg accuracy 0.8055555582046509/0.38125 over 10 splits
+subject 5, avg accuracy 0.8564327538013459/0.32018348649827716 over 10 splits
+subject 6, avg accuracy 0.7029239714145661/0.3462809922773976 over 10 splits
+subject 7, avg accuracy 0.7397660911083221/0.282758618754217 over 10 splits
+subject 8, avg accuracy 0.7842105329036713/0.3442477904326092 over 10 splits
+subject 9, avg accuracy 0.8017543911933899/0.32650602366550857 over 10 splits
+subject 11, avg accuracy 0.7751461923122406/0.37346938775510213 over 10 splits
+subject 12, avg accuracy 0.7842105388641357/0.283157892415398 over 10 splits
+subject 13, avg accuracy 0.8093567252159118/0.34955752360082304 over 10 splits
+subject 14, avg accuracy 0.7486842095851898/0.45135135191517906 over 10 splits
+subject 15, avg accuracy 0.8175438582897187/0.33599999998807906 over 10 splits
+subject 16, avg accuracy 0.7357894718647003/0.4016129077442231 over 10 splits
+subject 17, avg accuracy 0.7421052694320679/0.39264705882352935 over 10 splits
+subject 18, avg accuracy 0.7690058469772338/0.30428571454116277 over 10 splits
+subject 19, avg accuracy 0.7780701875686645/0.3098901093824879 over 10 splits
+avg accuracy over all subjects 0.7735688785711923/0.34951102211250695
+subject 1, avg accuracy 0.7456140398979187/0.3311111119886239 over 10 splits
+subject 2, avg accuracy 0.7271929860115052/0.37837837918384654 over 10 splits
+subject 3, avg accuracy 0.8342105329036713/0.3523076923076924 over 10 splits
+subject 4, avg accuracy 0.762573105096817/0.4145833333333334 over 10 splits
+subject 5, avg accuracy 0.866374272108078/0.3431192663011201 over 10 splits
+subject 6, avg accuracy 0.7722222208976746/0.36611570201136845 over 10 splits
+subject 7, avg accuracy 0.6976608246564865/0.3068965512959437 over 10 splits
+subject 8, avg accuracy 0.8000000059604645/0.3539823044717839 over 10 splits
+subject 9, avg accuracy 0.8166666686534881/0.30240963911076624 over 10 splits
+subject 11, avg accuracy 0.763450288772583/0.3683673469387755 over 10 splits
+subject 12, avg accuracy 0.7736842155456543/0.3210526283791191 over 10 splits
+subject 13, avg accuracy 0.8248538076877594/0.3362831868956574 over 10 splits
+subject 14, avg accuracy 0.7542105317115784/0.4297297303136941 over 10 splits
+subject 15, avg accuracy 0.7847953200340271/0.36079999902248383 over 10 splits
+subject 16, avg accuracy 0.7602631568908691/0.3532258115949169 over 10 splits
+subject 17, avg accuracy 0.7526315808296203/0.2926470588235294 over 10 splits
+subject 18, avg accuracy 0.7847953259944915/0.2514285719820431 over 10 splits
+subject 19, avg accuracy 0.7350877285003662/0.29120879114329157 over 10 splits
+avg accuracy over all subjects 0.775349256230725/0.3418692836165549
+subject 1, avg accuracy 0.7622807025909424/0.3311111130648189 over 10 splits
+subject 2, avg accuracy 0.7111111104488372/0.43108108236983017 over 10 splits
+subject 3, avg accuracy 0.8271929860115051/0.36153846153846153 over 10 splits
+subject 4, avg accuracy 0.7552631676197052/0.3958333333333333 over 10 splits
+subject 5, avg accuracy 0.8675438582897186/0.32935779884867705 over 10 splits
+subject 6, avg accuracy 0.773099422454834/0.33388429835808175 over 10 splits
+subject 7, avg accuracy 0.6649122774600983/0.32298850499350445 over 10 splits
+subject 8, avg accuracy 0.7894736945629119/0.3539823041025517 over 10 splits
+subject 9, avg accuracy 0.8377192974090576/0.3204819280519543 over 10 splits
+subject 11, avg accuracy 0.7461988389492035/0.3571428571428571 over 10 splits
+subject 12, avg accuracy 0.7894736886024475/0.3031578920389476 over 10 splits
+subject 13, avg accuracy 0.8032163918018341/0.32920354103620075 over 10 splits
+subject 14, avg accuracy 0.7221052646636963/0.4162162168807274 over 10 splits
+subject 15, avg accuracy 0.8125730991363526/0.32879999923706055 over 10 splits
+subject 16, avg accuracy 0.7560526251792907/0.40967742411359664 over 10 splits
+subject 17, avg accuracy 0.7789473712444306/0.3558823529411765 over 10 splits
+subject 18, avg accuracy 0.783625727891922/0.3257142861400332 over 10 splits
+subject 19, avg accuracy 0.7780701756477356/0.3010989005585293 over 10 splits
+avg accuracy over all subjects 0.7754922055535847/0.35039734970835235
+subject 1, avg accuracy 0.7023391783237457/0.3300000016225709 over 10 splits
+subject 2, avg accuracy 0.7491228103637695/0.43243243311708035 over 10 splits
+subject 3, avg accuracy 0.8230994164943695/0.37384615384615383 over 10 splits
+subject 4, avg accuracy 0.7611111104488373/0.384375 over 10 splits
+subject 5, avg accuracy 0.8502923965454101/0.34311926656086505 over 10 splits
+subject 6, avg accuracy 0.7619883060455322/0.3173553709895157 over 10 splits
+subject 7, avg accuracy 0.7184210538864135/0.3034482741321641 over 10 splits
+subject 8, avg accuracy 0.7684210538864136/0.3805309764843071 over 10 splits
+subject 9, avg accuracy 0.8058479607105256/0.33373493945383165 over 10 splits
+subject 11, avg accuracy 0.7631578981876374/0.3469387755102041 over 10 splits
+subject 12, avg accuracy 0.7736842095851898/0.3315789445136722 over 10 splits
+subject 13, avg accuracy 0.7923976659774781/0.3477876118854084 over 10 splits
+subject 14, avg accuracy 0.7481578975915909/0.4310810818060025 over 10 splits
+subject 15, avg accuracy 0.8350877165794373/0.3319999994039535 over 10 splits
+subject 16, avg accuracy 0.7723684310913086/0.37580645569870547 over 10 splits
+subject 17, avg accuracy 0.7578947484493256/0.3235294117647059 over 10 splits
+subject 18, avg accuracy 0.7526315689086914/0.3000000007237707 over 10 splits
+subject 19, avg accuracy 0.7242690026760101/0.3219780221745209 over 10 splits
+avg accuracy over all subjects 0.7700162458750939/0.3505301510937462
+subject 1, avg accuracy 0.7444444596767426/0.3388888913061884 over 10 splits
+subject 2, avg accuracy 0.7312865614891052/0.42162162274927706 over 10 splits
+subject 3, avg accuracy 0.8552631556987762/0.3815384615384615 over 10 splits
+subject 4, avg accuracy 0.7777777850627899/0.3875 over 10 splits
+subject 5, avg accuracy 0.8561403453350067/0.3266055049562673 over 10 splits
+subject 6, avg accuracy 0.7233918190002442/0.31735537175304634 over 10 splits
+subject 7, avg accuracy 0.7345029175281524/0.2678160901727348 over 10 splits
+subject 8, avg accuracy 0.8000000059604645/0.3442477912765688 over 10 splits
+subject 9, avg accuracy 0.8067251443862915/0.3445783134684505 over 10 splits
+subject 11, avg accuracy 0.8005847930908203/0.3489795918367347 over 10 splits
+subject 12, avg accuracy 0.7894737005233765/0.2978947347088864 over 10 splits
+subject 13, avg accuracy 0.8245613992214202/0.34159292151442666 over 10 splits
+subject 14, avg accuracy 0.7957894742488861/0.44594594634868 over 10 splits
+subject 15, avg accuracy 0.7570175468921662/0.31119999959468836 over 10 splits
+subject 16, avg accuracy 0.7821052610874176/0.38064516451089614 over 10 splits
+subject 17, avg accuracy 0.7631578922271729/0.27941176470588236 over 10 splits
+subject 18, avg accuracy 0.7736842095851898/0.31000000072377065 over 10 splits
+subject 19, avg accuracy 0.7339181303977966/0.3186813179116982 over 10 splits
+avg accuracy over all subjects 0.7805458111895456/0.3424724160598144
+subject 1, avg accuracy 0.7143274784088135/0.33666666964689884 over 10 splits
+subject 2, avg accuracy 0.6880116999149323/0.387837838643306 over 10 splits
+subject 3, avg accuracy 0.8236842095851898/0.37384615384615383 over 10 splits
+subject 4, avg accuracy 0.7932748556137085/0.39895833333333336 over 10 splits
+subject 5, avg accuracy 0.8400584876537323/0.33944954165351493 over 10 splits
+subject 6, avg accuracy 0.7602339267730713/0.3809917352416299 over 10 splits
+subject 7, avg accuracy 0.7014619886875153/0.30229884882768 over 10 splits
+subject 8, avg accuracy 0.7842105269432068/0.3610619506477255 over 10 splits
+subject 9, avg accuracy 0.7956140339374542/0.32048192807888404 over 10 splits
+subject 11, avg accuracy 0.768421059846878/0.3295918367346939 over 10 splits
+subject 12, avg accuracy 0.7736842095851898/0.29263157640632825 over 10 splits
+subject 13, avg accuracy 0.7502924025058746/0.34070796603913855 over 10 splits
+subject 14, avg accuracy 0.7321052610874176/0.4135135146210322 over 10 splits
+subject 15, avg accuracy 0.8011695921421051/0.31600000002980233 over 10 splits
+subject 16, avg accuracy 0.7671052753925324/0.445161294071905 over 10 splits
+subject 17, avg accuracy 0.7578947365283966/0.3205882352941177 over 10 splits
+subject 18, avg accuracy 0.7418128728866578/0.3014285718968936 over 10 splits
+subject 19, avg accuracy 0.7005847960710525/0.3153846164326091 over 10 splits
+avg accuracy over all subjects 0.7607748563090959/0.3487000339692026
+subject 1, avg accuracy 0.7669590651988983/0.3244444463981523 over 10 splits
+subject 2, avg accuracy 0.7114035129547119/0.39864864989712434 over 10 splits
+subject 3, avg accuracy 0.8447368502616882/0.3646153846153847 over 10 splits
+subject 4, avg accuracy 0.7935672581195832/0.3958333333333333 over 10 splits
+subject 5, avg accuracy 0.8771929800510406/0.34036697305123736 over 10 splits
+subject 6, avg accuracy 0.6903508722782135/0.3413223137293965 over 10 splits
+subject 7, avg accuracy 0.7289473712444305/0.29885057329103865 over 10 splits
+subject 8, avg accuracy 0.8000000059604645/0.36460177331371646 over 10 splits
+subject 9, avg accuracy 0.8011695921421051/0.36265060269688987 over 10 splits
+subject 11, avg accuracy 0.7847953259944915/0.36938775510204086 over 10 splits
+subject 12, avg accuracy 0.7210526406764984/0.30526315560466366 over 10 splits
+subject 13, avg accuracy 0.7543859720230103/0.3566371696185221 over 10 splits
+subject 14, avg accuracy 0.7486842095851898/0.43243243376145485 over 10 splits
+subject 15, avg accuracy 0.7847953200340271/0.33919999957084657 over 10 splits
+subject 16, avg accuracy 0.7771052718162537/0.412903229363503 over 10 splits
+subject 17, avg accuracy 0.7157894670963287/0.3411764705882354 over 10 splits
+subject 18, avg accuracy 0.7631578922271729/0.28428571483918597 over 10 splits
+subject 19, avg accuracy 0.7406432688236236/0.3131868133014375 over 10 splits
+avg accuracy over all subjects 0.7669298264715407/0.3525448217820091
+subject 1, avg accuracy 0.7400584816932678/0.2933333356181781 over 10 splits
+subject 2, avg accuracy 0.7649122714996338/0.45405405538307664 over 10 splits
+subject 3, avg accuracy 0.8397660970687866/0.38307692307692304 over 10 splits
+subject 4, avg accuracy 0.7733918130397797/0.38125 over 10 splits
+subject 5, avg accuracy 0.8728070199489594/0.312844037394458 over 10 splits
+subject 6, avg accuracy 0.740350878238678/0.33388429845660184 over 10 splits
+subject 7, avg accuracy 0.7233918130397796/0.30344827478301944 over 10 splits
+subject 8, avg accuracy 0.7684210479259491/0.3513274374788841 over 10 splits
+subject 9, avg accuracy 0.8178362607955932/0.3289156609989074 over 10 splits
+subject 11, avg accuracy 0.7353801190853119/0.38775510204081637 over 10 splits
+subject 12, avg accuracy 0.7473684251308441/0.2747368396583356 over 10 splits
+subject 13, avg accuracy 0.8035087764263154/0.35398230224320326 over 10 splits
+subject 14, avg accuracy 0.7060526311397552/0.42837837898247955 over 10 splits
+subject 15, avg accuracy 0.8014619827270508/0.3223999990701675 over 10 splits
+subject 16, avg accuracy 0.7926315903663635/0.4387096814570888 over 10 splits
+subject 17, avg accuracy 0.7368421077728271/0.3455882352941177 over 10 splits
+subject 18, avg accuracy 0.7733918070793152/0.2728571435383388 over 10 splits
+subject 19, avg accuracy 0.7558479547500611/0.34065933993884495 over 10 splits
+avg accuracy over all subjects 0.7718567265404596/0.35040005807852453
+subject 1, avg accuracy 0.7073099493980408/0.3266666694151031 over 10 splits
+subject 2, avg accuracy 0.7596491277217865/0.43378378458925193 over 10 splits
+subject 3, avg accuracy 0.8599415242671966/0.3484615384615385 over 10 splits
+subject 4, avg accuracy 0.7885964989662171/0.32708333333333334 over 10 splits
+subject 5, avg accuracy 0.8505847930908204/0.35963302790571794 over 10 splits
+subject 6, avg accuracy 0.7517543911933899/0.35123966998797795 over 10 splits
+subject 7, avg accuracy 0.6809941530227661/0.2827586188398559 over 10 splits
+subject 8, avg accuracy 0.778947365283966/0.33539823145992986 over 10 splits
+subject 9, avg accuracy 0.8005847930908203/0.3108433733593269 over 10 splits
+subject 11, avg accuracy 0.718713453412056/0.3673469387755102 over 10 splits
+subject 12, avg accuracy 0.7157894790172576/0.31368420814213 over 10 splits
+subject 13, avg accuracy 0.7871345162391663/0.3327433640977978 over 10 splits
+subject 14, avg accuracy 0.7168421030044556/0.4283783791838466 over 10 splits
+subject 15, avg accuracy 0.7733918130397797/0.288800000166893 over 10 splits
+subject 16, avg accuracy 0.7607894718647004/0.40967742382518707 over 10 splits
+subject 17, avg accuracy 0.7315789550542832/0.33382352941176474 over 10 splits
+subject 18, avg accuracy 0.7578947365283966/0.2771428576963288 over 10 splits
+subject 19, avg accuracy 0.7119883060455322/0.3000000002947482 over 10 splits
+avg accuracy over all subjects 0.7584714127911462/0.3404147193859023
+subject 1, avg accuracy 0.7616959035396575/0.3333333353863822 over 10 splits
+subject 2, avg accuracy 0.7546783685684204/0.4013513523179131 over 10 splits
+subject 3, avg accuracy 0.8555555522441864/0.34923076923076923 over 10 splits
+subject 4, avg accuracy 0.8149122893810272/0.4041666666666667 over 10 splits
+subject 5, avg accuracy 0.8611111104488373/0.3376146793502186 over 10 splits
+subject 6, avg accuracy 0.6853801131248474/0.3280991752039303 over 10 splits
+subject 7, avg accuracy 0.7181286662817001/0.3022988493757686 over 10 splits
+subject 8, avg accuracy 0.8157894730567932/0.3672566406758485 over 10 splits
+subject 9, avg accuracy 0.7690058529376984/0.3277108439031135 over 10 splits
+subject 11, avg accuracy 0.7847953200340271/0.3714285714285715 over 10 splits
+subject 12, avg accuracy 0.7947368383407593/0.2747368398779317 over 10 splits
+subject 13, avg accuracy 0.8040935695171356/0.3398230103924211 over 10 splits
+subject 14, avg accuracy 0.7534210622310639/0.4391891899141105 over 10 splits
+subject 15, avg accuracy 0.790350878238678/0.32479999947547916 over 10 splits
+subject 16, avg accuracy 0.7923684239387512/0.3983871010042006 over 10 splits
+subject 17, avg accuracy 0.7578947365283966/0.3720588235294118 over 10 splits
+subject 18, avg accuracy 0.7748537957668304/0.294285714839186 over 10 splits
+subject 19, avg accuracy 0.7619883060455322/0.2923076924386915 over 10 splits
+avg accuracy over all subjects 0.7805977922346856/0.3476710697228119
+subject 1, avg accuracy 0.6979532182216645/0.3555555588669247 over 10 splits
+subject 2, avg accuracy 0.7324561357498169/0.4472972980222186 over 10 splits
+subject 3, avg accuracy 0.8385964870452881/0.3653846153846154 over 10 splits
+subject 4, avg accuracy 0.7997076094150544/0.36875 over 10 splits
+subject 5, avg accuracy 0.8456140398979187/0.31192660569597813 over 10 splits
+subject 6, avg accuracy 0.7514619827270508/0.32727272793773776 over 10 splits
+subject 7, avg accuracy 0.6921052664518357/0.30459769940239256 over 10 splits
+subject 8, avg accuracy 0.7842105388641357/0.34778761420629717 over 10 splits
+subject 9, avg accuracy 0.8119883120059967/0.29759036209209855 over 10 splits
+subject 11, avg accuracy 0.7795321643352509/0.33877551020408164 over 10 splits
+subject 12, avg accuracy 0.7684210538864136/0.2989473658172707 over 10 splits
+subject 13, avg accuracy 0.8128655076026916/0.2973451342071052 over 10 splits
+subject 14, avg accuracy 0.7486842215061188/0.4418918927376335 over 10 splits
+subject 15, avg accuracy 0.8397660791873932/0.33839999959468836 over 10 splits
+subject 16, avg accuracy 0.802368426322937/0.38548387524581723 over 10 splits
+subject 17, avg accuracy 0.7473684191703797/0.3382352941176471 over 10 splits
+subject 18, avg accuracy 0.7631578922271729/0.28857142921004975 over 10 splits
+subject 19, avg accuracy 0.7728070199489594/0.3208791215996166 over 10 splits
+avg accuracy over all subjects 0.7771702430314489/0.3430384502412318
+subject 1, avg accuracy 0.7505847990512848/0.3266666696137852 over 10 splits
+subject 2, avg accuracy 0.7593567192554473/0.3972972979416719 over 10 splits
+subject 3, avg accuracy 0.8064327538013458/0.36615384615384616 over 10 splits
+subject 4, avg accuracy 0.7833333313465118/0.38333333333333336 over 10 splits
+subject 5, avg accuracy 0.8672514617443084/0.335779816937556 over 10 splits
+subject 6, avg accuracy 0.7780701637268066/0.2950413238411108 over 10 splits
+subject 7, avg accuracy 0.7073099434375762/0.37586206822902307 over 10 splits
+subject 8, avg accuracy 0.7947368383407593/0.3469026584540848 over 10 splits
+subject 9, avg accuracy 0.8277777791023254/0.310843373107982 over 10 splits
+subject 11, avg accuracy 0.7742690086364746/0.3704081632653061 over 10 splits
+subject 12, avg accuracy 0.7894736886024475/0.326315787183611 over 10 splits
+subject 13, avg accuracy 0.7923976659774781/0.34336283264961914 over 10 splits
+subject 14, avg accuracy 0.7276315808296203/0.4283783787005656 over 10 splits
+subject 15, avg accuracy 0.8347953140735627/0.3200000000834465 over 10 splits
+subject 16, avg accuracy 0.7400000035762787/0.36612903711295897 over 10 splits
+subject 17, avg accuracy 0.7684210568666459/0.35000000000000003 over 10 splits
+subject 18, avg accuracy 0.7464912354946136/0.26428571505205967 over 10 splits
+subject 19, avg accuracy 0.729824560880661/0.3054945050523831 over 10 splits
+avg accuracy over all subjects 0.7765643280413417/0.3451252670395746
+subject 1, avg accuracy 0.7514619827270508/0.3066666679581006 over 10 splits
+subject 2, avg accuracy 0.7385964870452881/0.3729729740200816 over 10 splits
+subject 3, avg accuracy 0.8441520512104035/0.36923076923076925 over 10 splits
+subject 4, avg accuracy 0.7833333313465118/0.3885416666666667 over 10 splits
+subject 5, avg accuracy 0.8505847930908204/0.32293578018562513 over 10 splits
+subject 6, avg accuracy 0.7459064364433289/0.3190082655465307 over 10 splits
+subject 7, avg accuracy 0.7228070199489594/0.32183907944923157 over 10 splits
+subject 8, avg accuracy 0.7736842155456543/0.36106195035761435 over 10 splits
+subject 9, avg accuracy 0.7853801190853119/0.3506024088127067 over 10 splits
+subject 11, avg accuracy 0.7517543911933899/0.37448979591836734 over 10 splits
+subject 12, avg accuracy 0.7473684251308441/0.27789473486574073 over 10 splits
+subject 13, avg accuracy 0.7766081929206848/0.34867256757168646 over 10 splits
+subject 14, avg accuracy 0.7899999976158142/0.39729729810276543 over 10 splits
+subject 15, avg accuracy 0.7967836260795593/0.35920000056028367 over 10 splits
+subject 16, avg accuracy 0.8078947365283966/0.44516129512940694 over 10 splits
+subject 17, avg accuracy 0.7578947424888611/0.32794117647058824 over 10 splits
+subject 18, avg accuracy 0.7356725037097931/0.3371428576537542 over 10 splits
+subject 19, avg accuracy 0.729824560880661/0.3010988991666626 over 10 splits
+avg accuracy over all subjects 0.7716504229439631/0.34898656598147676
+subject 1, avg accuracy 0.7026315867900849/0.3133333343598578 over 10 splits
+subject 2, avg accuracy 0.7175438523292541/0.38243243339899424 over 10 splits
+subject 3, avg accuracy 0.8494152069091797/0.3815384615384615 over 10 splits
+subject 4, avg accuracy 0.8163742661476135/0.39166666666666666 over 10 splits
+subject 5, avg accuracy 0.8450292348861694/0.33394495463425955 over 10 splits
+subject 6, avg accuracy 0.728947377204895/0.3719008267787863 over 10 splits
+subject 7, avg accuracy 0.7131578981876373/0.29540229763450293 over 10 splits
+subject 8, avg accuracy 0.7789473712444306/0.3796460202837412 over 10 splits
+subject 9, avg accuracy 0.817251455783844/0.32771084310419585 over 10 splits
+subject 11, avg accuracy 0.7631578862667083/0.3418367346938775 over 10 splits
+subject 12, avg accuracy 0.7631578981876374/0.2968421031926808 over 10 splits
+subject 13, avg accuracy 0.7771929979324341/0.3292035413658725 over 10 splits
+subject 14, avg accuracy 0.7534210562705994/0.4081081089941231 over 10 splits
+subject 15, avg accuracy 0.8122807025909424/0.3288000004291534 over 10 splits
+subject 16, avg accuracy 0.7357894837856293/0.4306451645589644 over 10 splits
+subject 17, avg accuracy 0.7052631616592407/0.3573529411764706 over 10 splits
+subject 18, avg accuracy 0.7362573027610779/0.3285714290823255 over 10 splits
+subject 19, avg accuracy 0.7614035069942474/0.3285714287188027 over 10 splits
+avg accuracy over all subjects 0.7654012358850903/0.35152818281176323
+subject 1, avg accuracy 0.7084795296192169/0.34222222410970266 over 10 splits
+subject 2, avg accuracy 0.7119882941246033/0.3837837848711658 over 10 splits
+subject 3, avg accuracy 0.85/0.36230769230769233 over 10 splits
+subject 4, avg accuracy 0.8061403572559357/0.3666666666666667 over 10 splits
+subject 5, avg accuracy 0.872222226858139/0.29174311972402645 over 10 splits
+subject 6, avg accuracy 0.7289473712444305/0.3074380158762301 over 10 splits
+subject 7, avg accuracy 0.7342105209827423/0.31724137792299534 over 10 splits
+subject 8, avg accuracy 0.7842105329036713/0.3646017736038275 over 10 splits
+subject 9, avg accuracy 0.7903508841991425/0.31445783114576914 over 10 splits
+subject 11, avg accuracy 0.7631578981876374/0.3714285714285714 over 10 splits
+subject 12, avg accuracy 0.7263157904148102/0.2915789446391558 over 10 splits
+subject 13, avg accuracy 0.7976608335971832/0.3424778770029017 over 10 splits
+subject 14, avg accuracy 0.7326315760612487/0.40675675699839714 over 10 splits
+subject 15, avg accuracy 0.7730994164943695/0.3183999988794327 over 10 splits
+subject 16, avg accuracy 0.7763157904148101/0.4129032291712299 over 10 splits
+subject 17, avg accuracy 0.7368421018123626/0.3588235294117647 over 10 splits
+subject 18, avg accuracy 0.7622806906700135/0.23714285752602987 over 10 splits
+subject 19, avg accuracy 0.740350878238678/0.326373625604006 over 10 splits
+avg accuracy over all subjects 0.7664002607266107/0.3397971042716425
+subject 1, avg accuracy 0.7254385948181152/0.33111111205485133 over 10 splits
+subject 2, avg accuracy 0.7119883030653/0.3905405417084694 over 10 splits
+subject 3, avg accuracy 0.855847954750061/0.36846153846153845 over 10 splits
+subject 4, avg accuracy 0.799122816324234/0.375 over 10 splits
+subject 5, avg accuracy 0.829824560880661/0.31467889975927293 over 10 splits
+subject 6, avg accuracy 0.7450292468070984/0.3314049593550114 over 10 splits
+subject 7, avg accuracy 0.7014619976282119/0.31609195378319976 over 10 splits
+subject 8, avg accuracy 0.7842105209827424/0.36637168473902 over 10 splits
+subject 9, avg accuracy 0.7967836260795593/0.31566265036901797 over 10 splits
+subject 11, avg accuracy 0.7415204614400863/0.3836734693877551 over 10 splits
+subject 12, avg accuracy 0.7684210538864136/0.27789473458340297 over 10 splits
+subject 13, avg accuracy 0.8289473712444305/0.33097345251425175 over 10 splits
+subject 14, avg accuracy 0.7542105317115784/0.4716216217827153 over 10 splits
+subject 15, avg accuracy 0.8228070080280304/0.29520000047683714 over 10 splits
+subject 16, avg accuracy 0.7763157963752747/0.4096774231041631 over 10 splits
+subject 17, avg accuracy 0.7526315867900848/0.3514705882352942 over 10 splits
+subject 18, avg accuracy 0.7409356653690338/0.28428571496691013 over 10 splits
+subject 19, avg accuracy 0.7622807085514068/0.30439560411723104 over 10 splits
+avg accuracy over all subjects 0.7720987669295734/0.3454731082999412
+subject 1, avg accuracy 0.7456140398979187/0.31333333591620127 over 10 splits
+subject 2, avg accuracy 0.6792397677898407/0.4135135144800753 over 10 splits
+subject 3, avg accuracy 0.8283625721931458/0.3423076923076923 over 10 splits
+subject 4, avg accuracy 0.7675438702106476/0.4114583333333333 over 10 splits
+subject 5, avg accuracy 0.840350866317749/0.31100917487242896 over 10 splits
+subject 6, avg accuracy 0.7938596546649933/0.3586776859011532 over 10 splits
+subject 7, avg accuracy 0.7248537957668304/0.29195402187520064 over 10 splits
+subject 8, avg accuracy 0.7684210658073425/0.3769911537919424 over 10 splits
+subject 9, avg accuracy 0.8073099493980408/0.30602409593671204 over 10 splits
+subject 11, avg accuracy 0.7804093599319458/0.3653061224489796 over 10 splits
+subject 12, avg accuracy 0.7736842274665833/0.2842105238061202 over 10 splits
+subject 13, avg accuracy 0.7821637451648712/0.3469026561200092 over 10 splits
+subject 14, avg accuracy 0.7434210658073426/0.4418918926772234 over 10 splits
+subject 15, avg accuracy 0.7622807085514068/0.33120000069141387 over 10 splits
+subject 16, avg accuracy 0.7765789449214935/0.3693548436126401 over 10 splits
+subject 17, avg accuracy 0.7473684251308441/0.3426470588235294 over 10 splits
+subject 18, avg accuracy 0.7894736886024475/0.254285714839186 over 10 splits
+subject 19, avg accuracy 0.8055555582046509/0.29780219675420405 over 10 splits
+avg accuracy over all subjects 0.7731384058793386/0.3421594454548915
+subject 1, avg accuracy 0.7239766180515289/0.32666666825612384 over 10 splits
+subject 2, avg accuracy 0.6953216373920441/0.39324324408898487 over 10 splits
+subject 3, avg accuracy 0.8444444417953492/0.34692307692307695 over 10 splits
+subject 4, avg accuracy 0.7236842215061188/0.3885416666666667 over 10 splits
+subject 5, avg accuracy 0.8239766001701355/0.35321100954342327 over 10 splits
+subject 6, avg accuracy 0.7511695921421051/0.3388429762903324 over 10 splits
+subject 7, avg accuracy 0.7500000029802323/0.3333333322200282 over 10 splits
+subject 8, avg accuracy 0.7842105269432068/0.3761061976968715 over 10 splits
+subject 9, avg accuracy 0.7856725215911865/0.32168674749064163 over 10 splits
+subject 11, avg accuracy 0.7359649181365967/0.36632653061224485 over 10 splits
+subject 12, avg accuracy 0.7526315867900848/0.28842105056110184 over 10 splits
+subject 13, avg accuracy 0.8026315867900848/0.3035398242484152 over 10 splits
+subject 14, avg accuracy 0.6957894742488862/0.43378378483089247 over 10 splits
+subject 15, avg accuracy 0.740350878238678/0.30160000028610223 over 10 splits
+subject 16, avg accuracy 0.7757894814014434/0.396774197393848 over 10 splits
+subject 17, avg accuracy 0.7684210538864136/0.32941176470588235 over 10 splits
+subject 18, avg accuracy 0.7850877285003662/0.31571428631033216 over 10 splits
+subject 19, avg accuracy 0.7008772015571594/0.2956043952605226 over 10 splits
+avg accuracy over all subjects 0.7577777817845344/0.3449850418547495
+subject 1, avg accuracy 0.7023391783237457/0.340000002251731 over 10 splits
+subject 2, avg accuracy 0.7333333313465118/0.3972972979416719 over 10 splits
+subject 3, avg accuracy 0.812573105096817/0.3653846153846154 over 10 splits
+subject 4, avg accuracy 0.7888888776302337/0.4072916666666667 over 10 splits
+subject 5, avg accuracy 0.8514619886875152/0.33394495467527197 over 10 splits
+subject 6, avg accuracy 0.7295321583747864/0.34049586796563525 over 10 splits
+subject 7, avg accuracy 0.6967836201190949/0.29310344692276813 over 10 splits
+subject 8, avg accuracy 0.8105263233184814/0.34955752555247954 over 10 splits
+subject 9, avg accuracy 0.8122807085514069/0.327710842583553 over 10 splits
+subject 11, avg accuracy 0.7631578981876374/0.30612244897959184 over 10 splits
+subject 12, avg accuracy 0.7684210479259491/0.2894736816067444 over 10 splits
+subject 13, avg accuracy 0.8192982494831085/0.2991150449598785 over 10 splits
+subject 14, avg accuracy 0.7747368454933167/0.4608108120995599 over 10 splits
+subject 15, avg accuracy 0.8067251443862915/0.3231999985098838 over 10 splits
+subject 16, avg accuracy 0.8026315808296204/0.3709677460693544 over 10 splits
+subject 17, avg accuracy 0.7473684251308441/0.388235294117647 over 10 splits
+subject 18, avg accuracy 0.7675438582897186/0.34571428631033213 over 10 splits
+subject 19, avg accuracy 0.7400584757328034/0.3010989010497763 over 10 splits
+avg accuracy over all subjects 0.7737589342726602/0.3466402463137312
+subject 1, avg accuracy 0.7181286573410034/0.3255555583039919 over 10 splits
+subject 2, avg accuracy 0.743274861574173/0.4270270281949558 over 10 splits
+subject 3, avg accuracy 0.8555555522441864/0.35461538461538467 over 10 splits
+subject 4, avg accuracy 0.7885964870452881/0.3552083333333333 over 10 splits
+subject 5, avg accuracy 0.8722222208976745/0.3284403675876626 over 10 splits
+subject 6, avg accuracy 0.7505847930908203/0.3413223139264367 over 10 splits
+subject 7, avg accuracy 0.7078947395086288/0.34712643544564303 over 10 splits
+subject 8, avg accuracy 0.810526317358017/0.3637168168230394 over 10 splits
+subject 9, avg accuracy 0.8277777791023254/0.32891566304557296 over 10 splits
+subject 11, avg accuracy 0.7520467817783356/0.3744897959183673 over 10 splits
+subject 12, avg accuracy 0.7842105329036713/0.297894734552032 over 10 splits
+subject 13, avg accuracy 0.7918128669261932/0.3194690280783493 over 10 splits
+subject 14, avg accuracy 0.7855263233184815/0.425675676400597 over 10 splits
+subject 15, avg accuracy 0.8239766061306/0.3304000001192092 over 10 splits
+subject 16, avg accuracy 0.797631585597992/0.3580645198783567 over 10 splits
+subject 17, avg accuracy 0.7315789461135864/0.30294117647058827 over 10 splits
+subject 18, avg accuracy 0.8064327418804169/0.34714285765375413 over 10 splits
+subject 19, avg accuracy 0.7619883060455322/0.3241758232915795 over 10 splits
+avg accuracy over all subjects 0.7838758943809404/0.34734341742438074
+subject 1, avg accuracy 0.7304093539714813/0.3244444457027647 over 10 splits
+subject 2, avg accuracy 0.6953216373920441/0.4270270280338623 over 10 splits
+subject 3, avg accuracy 0.8549707531929016/0.38769230769230767 over 10 splits
+subject 4, avg accuracy 0.8052631616592407/0.3333333333333333 over 10 splits
+subject 5, avg accuracy 0.8453216433525086/0.3238532117610678 over 10 splits
+subject 6, avg accuracy 0.7616959154605866/0.34297520806474135 over 10 splits
+subject 7, avg accuracy 0.7295321673154831/0.3333333319802394 over 10 splits
+subject 8, avg accuracy 0.7842105269432068/0.3734513306248505 over 10 splits
+subject 9, avg accuracy 0.7628655076026917/0.32891566354826274 over 10 splits
+subject 11, avg accuracy 0.8073099315166473/0.336734693877551 over 10 splits
+subject 12, avg accuracy 0.7631579041481018/0.31999999739621815 over 10 splits
+subject 13, avg accuracy 0.7710526406764984/0.355752213734441 over 10 splits
+subject 14, avg accuracy 0.7486842215061188/0.46351351472171576 over 10 splits
+subject 15, avg accuracy 0.7956140398979187/0.3167999992489815 over 10 splits
+subject 16, avg accuracy 0.7607894718647004/0.4064516168448232 over 10 splits
+subject 17, avg accuracy 0.7052631676197052/0.32205882352941173 over 10 splits
+subject 18, avg accuracy 0.7950292468070984/0.3357142861826079 over 10 splits
+subject 19, avg accuracy 0.8058479487895965/0.33846153852703803 over 10 splits
+avg accuracy over all subjects 0.7734632910953628/0.3539173636002343
+subject 1, avg accuracy 0.7242690086364746/0.32333333508835893 over 10 splits
+subject 2, avg accuracy 0.7219298273324967/0.41486486607306705 over 10 splits
+subject 3, avg accuracy 0.860526317358017/0.34615384615384615 over 10 splits
+subject 4, avg accuracy 0.8213450312614441/0.38437499999999997 over 10 splits
+subject 5, avg accuracy 0.8192982494831085/0.34311926636947404 over 10 splits
+subject 6, avg accuracy 0.7514619827270508/0.36611570348916966 over 10 splits
+subject 7, avg accuracy 0.6654970735311508/0.31379310286593165 over 10 splits
+subject 8, avg accuracy 0.789473682641983/0.37079646260337495 over 10 splits
+subject 9, avg accuracy 0.8283625841140747/0.35421686667993846 over 10 splits
+subject 11, avg accuracy 0.7570175468921662/0.3510204081632654 over 10 splits
+subject 12, avg accuracy 0.768421059846878/0.3315789447646392 over 10 splits
+subject 13, avg accuracy 0.7979532241821289/0.3309734525142517 over 10 splits
+subject 14, avg accuracy 0.7218421101570129/0.3945945958430702 over 10 splits
+subject 15, avg accuracy 0.7900584816932679/0.3400000008940697 over 10 splits
+subject 16, avg accuracy 0.7402631580829621/0.3919354885816574 over 10 splits
+subject 17, avg accuracy 0.715789470076561/0.33676470588235297 over 10 splits
+subject 18, avg accuracy 0.7692982316017151/0.2400000006386212 over 10 splits
+subject 19, avg accuracy 0.717251467704773/0.30329670332945313 over 10 splits
+avg accuracy over all subjects 0.7644476948512926/0.3464962638852523
+subject 1, avg accuracy 0.7567251443862915/0.35111111366086534 over 10 splits
+subject 2, avg accuracy 0.7271929860115052/0.44729729866659323 over 10 splits
+subject 3, avg accuracy 0.8125730991363526/0.38076923076923075 over 10 splits
+subject 4, avg accuracy 0.7719298422336578/0.378125 over 10 splits
+subject 5, avg accuracy 0.850877195596695/0.3366972483352784 over 10 splits
+subject 6, avg accuracy 0.7608187258243561/0.3264462803883001 over 10 splits
+subject 7, avg accuracy 0.723684212565422/0.2999999992121225 over 10 splits
+subject 8, avg accuracy 0.7578947365283966/0.39734513419391837 over 10 splits
+subject 9, avg accuracy 0.8119883060455322/0.32289156606757496 over 10 splits
+subject 11, avg accuracy 0.7900584816932679/0.34285714285714286 over 10 splits
+subject 12, avg accuracy 0.768421059846878/0.3031578922585437 over 10 splits
+subject 13, avg accuracy 0.7713450372219086/0.32300885103445137 over 10 splits
+subject 14, avg accuracy 0.7434210538864136/0.3608108116968258 over 10 splits
+subject 15, avg accuracy 0.791812863945961/0.31759999966621394 over 10 splits
+subject 16, avg accuracy 0.7721052706241608/0.4032258102009373 over 10 splits
+subject 17, avg accuracy 0.7421052753925323/0.31029411764705883 over 10 splits
+subject 18, avg accuracy 0.8116958975791931/0.2742857148817607 over 10 splits
+subject 19, avg accuracy 0.7616959035396575/0.3065934060366599 over 10 splits
+avg accuracy over all subjects 0.7736858384476767/0.3434731454207488
+subject 1, avg accuracy 0.7239766180515289/0.3200000013576613 over 10 splits
+subject 2, avg accuracy 0.7818713486194611/0.413513514641169 over 10 splits
+subject 3, avg accuracy 0.8178362607955932/0.3792307692307692 over 10 splits
+subject 4, avg accuracy 0.8269005954265595/0.396875 over 10 splits
+subject 5, avg accuracy 0.861403512954712/0.3027522941316486 over 10 splits
+subject 6, avg accuracy 0.760526317358017/0.37190082680341624 over 10 splits
+subject 7, avg accuracy 0.6865497082471848/0.28620689535278016 over 10 splits
+subject 8, avg accuracy 0.7421052664518356/0.36460177370932245 over 10 splits
+subject 9, avg accuracy 0.7809941530227661/0.3325301193688289 over 10 splits
+subject 11, avg accuracy 0.7514619886875152/0.37857142857142856 over 10 splits
+subject 12, avg accuracy 0.778947377204895/0.31473683965833565 over 10 splits
+subject 13, avg accuracy 0.7871345043182373/0.3371681430830365 over 10 splits
+subject 14, avg accuracy 0.7278947293758392/0.45405405467829185 over 10 splits
+subject 15, avg accuracy 0.7684210538864136/0.33680000009536737 over 10 splits
+subject 16, avg accuracy 0.7921052634716034/0.3774193595493993 over 10 splits
+subject 17, avg accuracy 0.7210526317358017/0.3602941176470589 over 10 splits
+subject 18, avg accuracy 0.7084795296192169/0.28285714324031563 over 10 splits
+subject 19, avg accuracy 0.7280701786279679/0.3043956039207322 over 10 splits
+avg accuracy over all subjects 0.7636517243252858/0.35077266027997567
+subject 1, avg accuracy 0.7023391783237457/0.31888889013065225 over 10 splits
+subject 2, avg accuracy 0.7119882941246033/0.4189189194827466 over 10 splits
+subject 3, avg accuracy 0.8336257398128509/0.35769230769230764 over 10 splits
+subject 4, avg accuracy 0.8061403512954712/0.384375 over 10 splits
+subject 5, avg accuracy 0.8716374218463898/0.3119266060104064 over 10 splits
+subject 6, avg accuracy 0.7070175468921661/0.3438016536068325 over 10 splits
+subject 7, avg accuracy 0.6654970705509186/0.28850574669824247 over 10 splits
+subject 8, avg accuracy 0.7315789520740509/0.356637171833916 over 10 splits
+subject 9, avg accuracy 0.7733918130397797/0.3409638558884701 over 10 splits
+subject 11, avg accuracy 0.7523391783237457/0.3673469387755102 over 10 splits
+subject 12, avg accuracy 0.7315789461135864/0.29263157624947395 over 10 splits
+subject 13, avg accuracy 0.7707602381706238/0.3469026563441859 over 10 splits
+subject 14, avg accuracy 0.7476315855979919/0.40405405469842864 over 10 splits
+subject 15, avg accuracy 0.7842105209827424/0.3375999997377396 over 10 splits
+subject 16, avg accuracy 0.7863157987594604/0.3967741974419163 over 10 splits
+subject 17, avg accuracy 0.7578947484493256/0.35000000000000003 over 10 splits
+subject 18, avg accuracy 0.7681286454200744/0.2857142862251827 over 10 splits
+subject 19, avg accuracy 0.7558479547500611/0.34505494521869406 over 10 splits
+avg accuracy over all subjects 0.7587735546959771/0.34709937811303915
+subject 1, avg accuracy 0.6967836260795593/0.3111111122866472 over 10 splits
+subject 2, avg accuracy 0.7277777791023254/0.4310810826920174 over 10 splits
+subject 3, avg accuracy 0.8500000059604644/0.36076923076923084 over 10 splits
+subject 4, avg accuracy 0.7780701875686645/0.3958333333333333 over 10 splits
+subject 5, avg accuracy 0.8459064364433289/0.32844036746462557 over 10 splits
+subject 6, avg accuracy 0.7456140339374542/0.31074380269966834 over 10 splits
+subject 7, avg accuracy 0.7076023399829865/0.3712643673536421 over 10 splits
+subject 8, avg accuracy 0.821052634716034/0.356637171728421 over 10 splits
+subject 9, avg accuracy 0.7690058529376984/0.37469879453440746 over 10 splits
+subject 11, avg accuracy 0.7254385948181152/0.35816326530612247 over 10 splits
+subject 12, avg accuracy 0.7736842215061188/0.28526315557329285 over 10 splits
+subject 13, avg accuracy 0.7757309973239899/0.31238938182328657 over 10 splits
+subject 14, avg accuracy 0.7692105293273925/0.43378378547526697 over 10 splits
+subject 15, avg accuracy 0.8017543852329254/0.31759999957084656 over 10 splits
+subject 16, avg accuracy 0.7255263209342957/0.40322581015286907 over 10 splits
+subject 17, avg accuracy 0.7631578922271729/0.36176470588235293 over 10 splits
+subject 18, avg accuracy 0.8070175409317016/0.27714285761117935 over 10 splits
+subject 19, avg accuracy 0.7555555462837219/0.3120879117440391 over 10 splits
+avg accuracy over all subjects 0.7688271625174417/0.3501111186667361
+subject 1, avg accuracy 0.7511695861816406/0.3200000018543667 over 10 splits
+subject 2, avg accuracy 0.7324561357498169/0.3729729739395348 over 10 splits
+subject 3, avg accuracy 0.8821637451648712/0.3523076923076924 over 10 splits
+subject 4, avg accuracy 0.7833333373069763/0.3947916666666667 over 10 splits
+subject 5, avg accuracy 0.8827485382556916/0.3266055049015841 over 10 splits
+subject 6, avg accuracy 0.7774853825569152/0.4165289269005957 over 10 splits
+subject 7, avg accuracy 0.6438596427440644/0.2873563205544976 over 10 splits
+subject 8, avg accuracy 0.800000011920929/0.3628318615455543 over 10 splits
+subject 9, avg accuracy 0.805847954750061/0.30481927677629944 over 10 splits
+subject 11, avg accuracy 0.7581871390342713/0.37142857142857144 over 10 splits
+subject 12, avg accuracy 0.789473706483841/0.26842105037287656 over 10 splits
+subject 13, avg accuracy 0.7769005835056305/0.3292035409307058 over 10 splits
+subject 14, avg accuracy 0.7436842143535614/0.443243244209805 over 10 splits
+subject 15, avg accuracy 0.8014619827270508/0.315999999833107 over 10 splits
+subject 16, avg accuracy 0.7560526371002197/0.38387097240455686 over 10 splits
+subject 17, avg accuracy 0.7578947424888611/0.3161764705882354 over 10 splits
+subject 18, avg accuracy 0.7301169574260712/0.24428571479661118 over 10 splits
+subject 19, avg accuracy 0.7508771896362305/0.34285714230039616 over 10 splits
+avg accuracy over all subjects 0.7735396381881503/0.3418722740173143
+subject 1, avg accuracy 0.7277777850627899/0.32888889117373366 over 10 splits
+subject 2, avg accuracy 0.7423976600170136/0.439189190155751 over 10 splits
+subject 3, avg accuracy 0.8128655016422272/0.3684615384615385 over 10 splits
+subject 4, avg accuracy 0.7997076034545898/0.3697916666666667 over 10 splits
+subject 5, avg accuracy 0.8561403572559356/0.3119266058053445 over 10 splits
+subject 6, avg accuracy 0.8160818755626679/0.3619834713945704 over 10 splits
+subject 7, avg accuracy 0.6494152128696442/0.3011494245166066 over 10 splits
+subject 8, avg accuracy 0.768421059846878/0.36106195014662446 over 10 splits
+subject 9, avg accuracy 0.8216374278068542/0.343373493221869 over 10 splits
+subject 11, avg accuracy 0.7640350878238678/0.3653061224489796 over 10 splits
+subject 12, avg accuracy 0.768421059846878/0.3031578921016894 over 10 splits
+subject 13, avg accuracy 0.7812865436077118/0.3451327444705288 over 10 splits
+subject 14, avg accuracy 0.8010526418685913/0.4513513515929918 over 10 splits
+subject 15, avg accuracy 0.8625730812549591/0.3472000000119209 over 10 splits
+subject 16, avg accuracy 0.7452631533145905/0.3838709708663725 over 10 splits
+subject 17, avg accuracy 0.7210526287555694/0.37941176470588234 over 10 splits
+subject 18, avg accuracy 0.7242690086364746/0.29285714341061453 over 10 splits
+subject 19, avg accuracy 0.7400584876537323/0.30109890085327756 over 10 splits
+avg accuracy over all subjects 0.7723586764600541/0.35306739566694234
+subject 1, avg accuracy 0.7067251563072204/0.315555557972855 over 10 splits
+subject 2, avg accuracy 0.7169590711593627/0.39459459507787553 over 10 splits
+subject 3, avg accuracy 0.8432748556137085/0.35153846153846163 over 10 splits
+subject 4, avg accuracy 0.7777777850627899/0.41875 over 10 splits
+subject 5, avg accuracy 0.8616959154605865/0.3366972479866732 over 10 splits
+subject 6, avg accuracy 0.7283625781536103/0.3504132236700413 over 10 splits
+subject 7, avg accuracy 0.6584795415401459/0.30459769941952036 over 10 splits
+subject 8, avg accuracy 0.7578947454690933/0.34601770286011485 over 10 splits
+subject 9, avg accuracy 0.7415204703807831/0.3626506023378258 over 10 splits
+subject 11, avg accuracy 0.746783635020256/0.3948979591836735 over 10 splits
+subject 12, avg accuracy 0.7631578922271729/0.27473683981518987 over 10 splits
+subject 13, avg accuracy 0.7979532182216644/0.3079646032468408 over 10 splits
+subject 14, avg accuracy 0.7323684334754944/0.42972973077683835 over 10 splits
+subject 15, avg accuracy 0.8008771896362304/0.3640000001311302 over 10 splits
+subject 16, avg accuracy 0.8181578993797303/0.37903226219838665 over 10 splits
+subject 17, avg accuracy 0.7421052634716034/0.33970588235294125 over 10 splits
+subject 18, avg accuracy 0.7730994105339051/0.28571428584201 over 10 splits
+subject 19, avg accuracy 0.7514619827270508/0.30329670278908133 over 10 splits
+avg accuracy over all subjects 0.7621475024355783/0.3477718531777478
+subject 1, avg accuracy 0.7447368383407593/0.3066666688190566 over 10 splits
+subject 2, avg accuracy 0.7383040964603425/0.4067567575219516 over 10 splits
+subject 3, avg accuracy 0.8657894670963288/0.3646153846153847 over 10 splits
+subject 4, avg accuracy 0.8005847930908203/0.353125 over 10 splits
+subject 5, avg accuracy 0.829824560880661/0.3284403673552592 over 10 splits
+subject 6, avg accuracy 0.7608187198638916/0.3190082653987506 over 10 splits
+subject 7, avg accuracy 0.6698830425739288/0.2988505735136997 over 10 splits
+subject 8, avg accuracy 0.7947368502616883/0.35929203880044214 over 10 splits
+subject 9, avg accuracy 0.7961988389492035/0.3228915659059962 over 10 splits
+subject 11, avg accuracy 0.7859649121761322/0.3561224489795918 over 10 splits
+subject 12, avg accuracy 0.7736842155456543/0.2957894717705877 over 10 splits
+subject 13, avg accuracy 0.7973684251308442/0.3380530984923903 over 10 splits
+subject 14, avg accuracy 0.7584210515022278/0.43783783856275915 over 10 splits
+subject 15, avg accuracy 0.7573099374771118/0.3031999997615814 over 10 splits
+subject 16, avg accuracy 0.708947378396988/0.40967742392132356 over 10 splits
+subject 17, avg accuracy 0.7368421077728271/0.35441176470588237 over 10 splits
+subject 18, avg accuracy 0.7669590711593628/0.2914285718968936 over 10 splits
+subject 19, avg accuracy 0.8061403512954712/0.331868132015506 over 10 splits
+avg accuracy over all subjects 0.7718063698874581/0.343224187335392
+subject 1, avg accuracy 0.7453216493129731/0.3266666695144441 over 10 splits
+subject 2, avg accuracy 0.7649122774600983/0.42972973073656495 over 10 splits
+subject 3, avg accuracy 0.8076023399829865/0.35461538461538467 over 10 splits
+subject 4, avg accuracy 0.7608187139034271/0.3885416666666667 over 10 splits
+subject 5, avg accuracy 0.8883040964603424/0.3440366980542831 over 10 splits
+subject 6, avg accuracy 0.7511695981025696/0.35371900937281364 over 10 splits
+subject 7, avg accuracy 0.6871345043182373/0.32183907903816505 over 10 splits
+subject 8, avg accuracy 0.8210526466369629/0.36194690526586715 over 10 splits
+subject 9, avg accuracy 0.813450288772583/0.32891566190554433 over 10 splits
+subject 11, avg accuracy 0.747076028585434/0.36020408163265305 over 10 splits
+subject 12, avg accuracy 0.7947368443012237/0.29578947086083257 over 10 splits
+subject 13, avg accuracy 0.8081871390342712/0.35840708083283584 over 10 splits
+subject 14, avg accuracy 0.795263159275055/0.4567567582065995 over 10 splits
+subject 15, avg accuracy 0.8125730872154235/0.3111999994277954 over 10 splits
+subject 16, avg accuracy 0.7921052694320678/0.4080645208397219 over 10 splits
+subject 17, avg accuracy 0.7842105329036713/0.36323529411764705 over 10 splits
+subject 18, avg accuracy 0.7961988329887391/0.32714285765375406 over 10 splits
+subject 19, avg accuracy 0.7839181244373321/0.31428571451496295 over 10 splits
+avg accuracy over all subjects 0.7863352851735219/0.3558386990698075
+subject 1, avg accuracy 0.7131578981876373/0.3400000010265245 over 10 splits
+subject 2, avg accuracy 0.7704678356647492/0.44594594667086723 over 10 splits
+subject 3, avg accuracy 0.8605263113975525/0.3684615384615385 over 10 splits
+subject 4, avg accuracy 0.782748544216156/0.35104166666666664 over 10 splits
+subject 5, avg accuracy 0.8459064364433289/0.31192660588736926 over 10 splits
+subject 6, avg accuracy 0.6859649181365967/0.35123967008649815 over 10 splits
+subject 7, avg accuracy 0.6809941560029984/0.3264367796395017 over 10 splits
+subject 8, avg accuracy 0.7631578981876374/0.3592920386949472 over 10 splits
+subject 9, avg accuracy 0.8011695921421051/0.33493975814746085 over 10 splits
+subject 11, avg accuracy 0.7751461923122406/0.3918367346938776 over 10 splits
+subject 12, avg accuracy 0.7789473712444306/0.32631578668167716 over 10 splits
+subject 13, avg accuracy 0.772222226858139/0.35752212504106284 over 10 splits
+subject 14, avg accuracy 0.7334210574626923/0.4189189199660276 over 10 splits
+subject 15, avg accuracy 0.7953216373920441/0.30559999960660933 over 10 splits
+subject 16, avg accuracy 0.7452631652355194/0.40483871371515334 over 10 splits
+subject 17, avg accuracy 0.7421052694320679/0.35294117647058826 over 10 splits
+subject 18, avg accuracy 0.7687134504318237/0.3485714287843023 over 10 splits
+subject 19, avg accuracy 0.8114035069942475/0.3186813173713265 over 10 splits
+avg accuracy over all subjects 0.7681465259856648/0.35636167820066655
+subject 1, avg accuracy 0.6967836320400238/0.33777777989705404 over 10 splits
+subject 2, avg accuracy 0.7043859660625458/0.42162162274927717 over 10 splits
+subject 3, avg accuracy 0.8447368443012238/0.37461538461538463 over 10 splits
+subject 4, avg accuracy 0.8321637451648712/0.390625 over 10 splits
+subject 5, avg accuracy 0.8672514617443084/0.33302752375602723 over 10 splits
+subject 6, avg accuracy 0.7184210568666458/0.3289256203519412 over 10 splits
+subject 7, avg accuracy 0.7178362548351288/0.2839080446239175 over 10 splits
+subject 8, avg accuracy 0.7578947395086288/0.3654867279846056 over 10 splits
+subject 9, avg accuracy 0.7953216433525085/0.3289156629019473 over 10 splits
+subject 11, avg accuracy 0.7900584757328033/0.3387755102040816 over 10 splits
+subject 12, avg accuracy 0.810526317358017/0.3031578922271728 over 10 splits
+subject 13, avg accuracy 0.7923976600170135/0.32566371805372485 over 10 splits
+subject 14, avg accuracy 0.7639473736286163/0.45135135219709294 over 10 splits
+subject 15, avg accuracy 0.8125730931758881/0.3408000004649162 over 10 splits
+subject 16, avg accuracy 0.7452631592750549/0.41129032709906177 over 10 splits
+subject 17, avg accuracy 0.7315789461135864/0.3544117647058824 over 10 splits
+subject 18, avg accuracy 0.7675438702106476/0.30571428622518265 over 10 splits
+subject 19, avg accuracy 0.7400584757328034/0.3351648353777089 over 10 splits
+avg accuracy over all subjects 0.7715968175066843/0.35173516963527657
+subject 1, avg accuracy 0.7184210538864135/0.3288888913724157 over 10 splits
+subject 2, avg accuracy 0.674561408162117/0.42567567664223754 over 10 splits
+subject 3, avg accuracy 0.8497075974941254/0.38769230769230767 over 10 splits
+subject 4, avg accuracy 0.7883040964603424/0.35104166666666664 over 10 splits
+subject 5, avg accuracy 0.8611111104488373/0.3642201842791443 over 10 splits
+subject 6, avg accuracy 0.7032163798809051/0.3776859502777581 over 10 splits
+subject 7, avg accuracy 0.7815789461135865/0.3114942512806804 over 10 splits
+subject 8, avg accuracy 0.778947377204895/0.3530973485613291 over 10 splits
+subject 9, avg accuracy 0.8172514736652374/0.3469879515020244 over 10 splits
+subject 11, avg accuracy 0.7482456147670746/0.3683673469387755 over 10 splits
+subject 12, avg accuracy 0.7842105329036713/0.34105262897516553 over 10 splits
+subject 13, avg accuracy 0.7865497171878815/0.33097345242194365 over 10 splits
+subject 14, avg accuracy 0.8273684263229371/0.40135135175408543 over 10 splits
+subject 15, avg accuracy 0.8678362548351288/0.3111999994516373 over 10 splits
+subject 16, avg accuracy 0.7502631574869156/0.3758064553141594 over 10 splits
+subject 17, avg accuracy 0.7421052634716034/0.3191176470588236 over 10 splits
+subject 18, avg accuracy 0.768128651380539/0.3228571432828903 over 10 splits
+subject 19, avg accuracy 0.7456140339374542/0.2901098891601458 over 10 splits
+avg accuracy over all subjects 0.777412283089426/0.3504233412573439
+subject 1, avg accuracy 0.7239766120910645/0.3022222237288952 over 10 splits
+subject 2, avg accuracy 0.7330409348011017/0.4027027036289911 over 10 splits
+subject 3, avg accuracy 0.8766081869602204/0.35461538461538467 over 10 splits
+subject 4, avg accuracy 0.7400584816932678/0.403125 over 10 splits
+subject 5, avg accuracy 0.8403508782386779/0.352293578856582 over 10 splits
+subject 6, avg accuracy 0.7125731110572815/0.33801652997239556 over 10 splits
+subject 7, avg accuracy 0.6915204703807831/0.29885057370210516 over 10 splits
+subject 8, avg accuracy 0.7578947365283966/0.3451327468969125 over 10 splits
+subject 9, avg accuracy 0.8277777850627899/0.30120481884623146 over 10 splits
+subject 11, avg accuracy 0.752923983335495/0.3755102040816326 over 10 splits
+subject 12, avg accuracy 0.7842105388641357/0.28736841848022054 over 10 splits
+subject 13, avg accuracy 0.7602339386940002/0.36991150558522323 over 10 splits
+subject 14, avg accuracy 0.7905263125896453/0.4310810820476429 over 10 splits
+subject 15, avg accuracy 0.7514619886875152/0.35440000023841856 over 10 splits
+subject 16, avg accuracy 0.7607894837856293/0.36290323099782384 over 10 splits
+subject 17, avg accuracy 0.7157894730567932/0.3544117647058823 over 10 splits
+subject 18, avg accuracy 0.7479532122611999/0.25142857164144516 over 10 splits
+subject 19, avg accuracy 0.7230994194746018/0.319780218388353 over 10 splits
+avg accuracy over all subjects 0.7605994193090333/0.34471991980078553
+subject 1, avg accuracy 0.7675438642501831/0.3477777795328034 over 10 splits
+subject 2, avg accuracy 0.705847954750061/0.4243243254117063 over 10 splits
+subject 3, avg accuracy 0.8447368502616882/0.37153846153846154 over 10 splits
+subject 4, avg accuracy 0.7730994164943695/0.3989583333333334 over 10 splits
+subject 5, avg accuracy 0.8453216433525086/0.3330275234142575 over 10 splits
+subject 6, avg accuracy 0.7845029234886169/0.30743801638114554 over 10 splits
+subject 7, avg accuracy 0.7184210479259491/0.2850574701681904 over 10 splits
+subject 8, avg accuracy 0.7631579041481018/0.35929203851033104 over 10 splits
+subject 9, avg accuracy 0.8114035069942475/0.34457831231944536 over 10 splits
+subject 11, avg accuracy 0.7631579041481018/0.40714285714285714 over 10 splits
+subject 12, avg accuracy 0.7578947484493256/0.3021052604600003 over 10 splits
+subject 13, avg accuracy 0.7923976719379425/0.3424778772930129 over 10 splits
+subject 14, avg accuracy 0.8057894825935363/0.43918919023629793 over 10 splits
+subject 15, avg accuracy 0.8070175349712372/0.33039999935626974 over 10 splits
+subject 16, avg accuracy 0.7913157939910889/0.36774193952160494 over 10 splits
+subject 17, avg accuracy 0.778947377204895/0.33382352941176474 over 10 splits
+subject 18, avg accuracy 0.8005847990512848/0.2900000004257475 over 10 splits
+subject 19, avg accuracy 0.745321637392044/0.34395604372679534 over 10 splits
+avg accuracy over all subjects 0.7809145589669545/0.3516016087880013
+subject 1, avg accuracy 0.6581871330738067/0.3155555568469895 over 10 splits
+subject 2, avg accuracy 0.7538011789321899/0.4310810818060024 over 10 splits
+subject 3, avg accuracy 0.8178362607955932/0.3823076923076923 over 10 splits
+subject 4, avg accuracy 0.8219298303127289/0.38645833333333335 over 10 splits
+subject 5, avg accuracy 0.8769005835056305/0.340366973338324 over 10 splits
+subject 6, avg accuracy 0.7558479547500611/0.38264462923215437 over 10 splits
+subject 7, avg accuracy 0.7289473682641983/0.28275861871996144 over 10 splits
+subject 8, avg accuracy 0.7473684310913086/0.3495575256579745 over 10 splits
+subject 9, avg accuracy 0.8172514617443085/0.3373493980571448 over 10 splits
+subject 11, avg accuracy 0.7687134444713593/0.3765306122448979 over 10 splits
+subject 12, avg accuracy 0.7894736886024475/0.3031578920389476 over 10 splits
+subject 13, avg accuracy 0.8146198868751526/0.3141592931167214 over 10 splits
+subject 14, avg accuracy 0.7794736921787262/0.4513513520762727 over 10 splits
+subject 15, avg accuracy 0.8070175349712372/0.31839999958276743 over 10 splits
+subject 16, avg accuracy 0.7613158047199249/0.39193548896620345 over 10 splits
+subject 17, avg accuracy 0.7473684221506118/0.34264705882352947 over 10 splits
+subject 18, avg accuracy 0.790350878238678/0.2985714289546013 over 10 splits
+subject 19, avg accuracy 0.7286549746990204/0.3406593404955916 over 10 splits
+avg accuracy over all subjects 0.775836584965388/0.352527348644395
+subject 1, avg accuracy 0.713450288772583/0.31666666833890816 over 10 splits
+subject 2, avg accuracy 0.6371345043182373/0.4283783791032997 over 10 splits
+subject 3, avg accuracy 0.8660818636417389/0.35384615384615387 over 10 splits
+subject 4, avg accuracy 0.7991228103637695/0.36562500000000003 over 10 splits
+subject 5, avg accuracy 0.8719298303127289/0.34403669820466176 over 10 splits
+subject 6, avg accuracy 0.7073099374771118/0.34132231454218714 over 10 splits
+subject 7, avg accuracy 0.7289473712444305/0.31609195212180585 over 10 splits
+subject 8, avg accuracy 0.8157894849777222/0.36991150787973825 over 10 splits
+subject 9, avg accuracy 0.785672515630722/0.3457831310579576 over 10 splits
+subject 11, avg accuracy 0.779824560880661/0.36632653061224485 over 10 splits
+subject 12, avg accuracy 0.810526329278946/0.28736841857433315 over 10 splits
+subject 13, avg accuracy 0.7812865555286408/0.352212390277238 over 10 splits
+subject 14, avg accuracy 0.7589473843574523/0.4540540552622563 over 10 splits
+subject 15, avg accuracy 0.8233918130397797/0.3560000002145767 over 10 splits
+subject 16, avg accuracy 0.812894731760025/0.3967741990281689 over 10 splits
+subject 17, avg accuracy 0.7421052634716034/0.33676470588235297 over 10 splits
+subject 18, avg accuracy 0.7853801071643829/0.28714285765375414 over 10 splits
+subject 19, avg accuracy 0.7733918130397797/0.30000000062224624 over 10 splits
+avg accuracy over all subjects 0.7773992869589065/0.35101694240121584
+subject 1, avg accuracy 0.7181286513805389/0.3155555570456717 over 10 splits
+subject 2, avg accuracy 0.7260233879089355/0.4324324329962602 over 10 splits
+subject 3, avg accuracy 0.8497075974941254/0.36153846153846153 over 10 splits
+subject 4, avg accuracy 0.7891812860965729/0.396875 over 10 splits
+subject 5, avg accuracy 0.8508772015571594/0.32752293603956145 over 10 splits
+subject 6, avg accuracy 0.7502923965454101/0.34876033078786756 over 10 splits
+subject 7, avg accuracy 0.7657894730567932/0.31724137800863417 over 10 splits
+subject 8, avg accuracy 0.7789473712444306/0.3451327467650439 over 10 splits
+subject 9, avg accuracy 0.8008772015571595/0.2867469884904034 over 10 splits
+subject 11, avg accuracy 0.7845029175281525/0.37244897959183676 over 10 splits
+subject 12, avg accuracy 0.7631579101085663/0.3073684185429623 over 10 splits
+subject 13, avg accuracy 0.8248538076877594/0.3398230101550575 over 10 splits
+subject 14, avg accuracy 0.7699999988079071/0.4297297303741042 over 10 splits
+subject 15, avg accuracy 0.8292397618293762/0.35199999939203264 over 10 splits
+subject 16, avg accuracy 0.755526316165924/0.40645161732550594 over 10 splits
+subject 17, avg accuracy 0.7263157904148102/0.33529411764705885 over 10 splits
+subject 18, avg accuracy 0.789473682641983/0.2885714292526245 over 10 splits
+subject 19, avg accuracy 0.7669590651988983/0.3175824175660427 over 10 splits
+avg accuracy over all subjects 0.7799918787346947/0.34894864175106277
+subject 1, avg accuracy 0.762573105096817/0.2911111132635011 over 10 splits
+subject 2, avg accuracy 0.7587719321250915/0.3891891907195787 over 10 splits
+subject 3, avg accuracy 0.8280701816082001/0.37 over 10 splits
+subject 4, avg accuracy 0.7997075974941253/0.38750000000000007 over 10 splits
+subject 5, avg accuracy 0.8239766001701355/0.34495412891884464 over 10 splits
+subject 6, avg accuracy 0.7289473652839661/0.33553719046440994 over 10 splits
+subject 7, avg accuracy 0.7286549746990204/0.29195402144700633 over 10 splits
+subject 8, avg accuracy 0.7736842036247253/0.3769911533172151 over 10 splits
+subject 9, avg accuracy 0.7581871390342713/0.308433735370636 over 10 splits
+subject 11, avg accuracy 0.7576023399829864/0.36224489795918363 over 10 splits
+subject 12, avg accuracy 0.7894736945629119/0.3452631553223259 over 10 splits
+subject 13, avg accuracy 0.8035087704658508/0.3212389394245317 over 10 splits
+subject 14, avg accuracy 0.7223684251308441/0.416216217384145 over 10 splits
+subject 15, avg accuracy 0.7850877225399018/0.32480000002384185 over 10 splits
+subject 16, avg accuracy 0.7876315772533417/0.417741939521605 over 10 splits
+subject 17, avg accuracy 0.8000000059604645/0.3382352941176471 over 10 splits
+subject 18, avg accuracy 0.7850877106189728/0.2642857150520597 over 10 splits
+subject 19, avg accuracy 0.7733918190002441/0.30659340670803087 over 10 splits
+avg accuracy over all subjects 0.7759291758139928/0.3440161166119201
+subject 1, avg accuracy 0.7175438582897187/0.34333333558506435 over 10 splits
+subject 2, avg accuracy 0.7219298243522644/0.41216216308845055 over 10 splits
+subject 3, avg accuracy 0.8447368502616882/0.3515384615384616 over 10 splits
+subject 4, avg accuracy 0.7459064424037933/0.36770833333333336 over 10 splits
+subject 5, avg accuracy 0.8558479487895966/0.34220183568263274 over 10 splits
+subject 6, avg accuracy 0.7400584816932678/0.36033057806905633 over 10 splits
+subject 7, avg accuracy 0.7339181393384934/0.3149425269885995 over 10 splits
+subject 8, avg accuracy 0.7631578922271729/0.35398230468277386 over 10 splits
+subject 9, avg accuracy 0.8116959154605865/0.3156626513205379 over 10 splits
+subject 11, avg accuracy 0.7850877165794372/0.3112244897959184 over 10 splits
+subject 12, avg accuracy 0.7631578981876374/0.30631578690127326 over 10 splits
+subject 13, avg accuracy 0.8187134563922882/0.31504424934366104 over 10 splits
+subject 14, avg accuracy 0.7744736850261689/0.4283783791032998 over 10 splits
+subject 15, avg accuracy 0.7842105209827424/0.3639999995112419 over 10 splits
+subject 16, avg accuracy 0.8076315820217133/0.36935484370877664 over 10 splits
+subject 17, avg accuracy 0.747368437051773/0.3647058823529412 over 10 splits
+subject 18, avg accuracy 0.7520467877388001/0.31857142899717605 over 10 splits
+subject 19, avg accuracy 0.7406432688236236/0.2824175825485816 over 10 splits
+avg accuracy over all subjects 0.7726738169789314/0.3456597129195433
+subject 1, avg accuracy 0.756725150346756/0.323333335088359 over 10 splits
+subject 2, avg accuracy 0.7809941530227661/0.46486486550923944 over 10 splits
+subject 3, avg accuracy 0.7903508841991425/0.35307692307692307 over 10 splits
+subject 4, avg accuracy 0.8418128669261933/0.39583333333333337 over 10 splits
+subject 5, avg accuracy 0.8616959095001221/0.3458715601798591 over 10 splits
+subject 6, avg accuracy 0.767251455783844/0.360330578918792 over 10 splits
+subject 7, avg accuracy 0.7342105329036712/0.33908045893085415 over 10 splits
+subject 8, avg accuracy 0.7473684251308441/0.355752216450936 over 10 splits
+subject 9, avg accuracy 0.8116959035396576/0.29397590360548126 over 10 splits
+subject 11, avg accuracy 0.7581871330738068/0.33571428571428574 over 10 splits
+subject 12, avg accuracy 0.7473684251308441/0.3094736813557776 over 10 splits
+subject 13, avg accuracy 0.8181286633014679/0.33008849666973133 over 10 splits
+subject 14, avg accuracy 0.7584210515022278/0.4108108112940917 over 10 splits
+subject 15, avg accuracy 0.8125730931758881/0.3295999994039535 over 10 splits
+subject 16, avg accuracy 0.761315792798996/0.3774193593571263 over 10 splits
+subject 17, avg accuracy 0.778947377204895/0.3058823529411765 over 10 splits
+subject 18, avg accuracy 0.708771926164627/0.24571428631033215 over 10 splits
+subject 19, avg accuracy 0.7733918130397797/0.312087912775658 over 10 splits
+avg accuracy over all subjects 0.7782894753747517/0.34382835338421724
+subject 1, avg accuracy 0.7447368502616882/0.31888889037900503 over 10 splits
+subject 2, avg accuracy 0.7330409348011017/0.4013513522373663 over 10 splits
+subject 3, avg accuracy 0.8611111164093017/0.3523076923076923 over 10 splits
+subject 4, avg accuracy 0.7997076034545898/0.4291666666666666 over 10 splits
+subject 5, avg accuracy 0.8663742780685425/0.3165137623975036 over 10 splits
+subject 6, avg accuracy 0.7827485382556916/0.3892561980515472 over 10 splits
+subject 7, avg accuracy 0.7184210598468781/0.33103448027509386 over 10 splits
+subject 8, avg accuracy 0.8157894790172577/0.3566371706207242 over 10 splits
+subject 9, avg accuracy 0.7850877165794372/0.32048192771084333 over 10 splits
+subject 11, avg accuracy 0.7573099374771118/0.34285714285714286 over 10 splits
+subject 12, avg accuracy 0.7578947305679321/0.29789473417558165 over 10 splits
+subject 13, avg accuracy 0.7818713545799255/0.36460177228514073 over 10 splits
+subject 14, avg accuracy 0.795789486169815/0.43513513626279055 over 10 splits
+subject 15, avg accuracy 0.8181286513805389/0.3255999996244907 over 10 splits
+subject 16, avg accuracy 0.7405263304710388/0.3854838746209298 over 10 splits
+subject 17, avg accuracy 0.7368421077728271/0.361764705882353 over 10 splits
+subject 18, avg accuracy 0.7631578922271729/0.29714285765375414 over 10 splits
+subject 19, avg accuracy 0.7789473712444306/0.33296703272140943 over 10 splits
+avg accuracy over all subjects 0.7798603021436267/0.3532825220405576
+subject 1, avg accuracy 0.7467836201190948/0.3533333350221316 over 10 splits
+subject 2, avg accuracy 0.710526317358017/0.4040540549803424 over 10 splits
+subject 3, avg accuracy 0.8450292408466339/0.3592307692307693 over 10 splits
+subject 4, avg accuracy 0.8271929919719696/0.3729166666666667 over 10 splits
+subject 5, avg accuracy 0.8555555522441864/0.35137614703506503 over 10 splits
+subject 6, avg accuracy 0.7625731110572815/0.3644628099912455 over 10 splits
+subject 7, avg accuracy 0.7508771896362305/0.3091954015281008 over 10 splits
+subject 8, avg accuracy 0.7894736945629119/0.3460177021216502 over 10 splits
+subject 9, avg accuracy 0.7961988329887391/0.33132530019943973 over 10 splits
+subject 11, avg accuracy 0.7581871449947357/0.36938775510204086 over 10 splits
+subject 12, avg accuracy 0.7578947424888611/0.29999999739621813 over 10 splits
+subject 13, avg accuracy 0.7716374278068543/0.3734513290951737 over 10 splits
+subject 14, avg accuracy 0.7323684215545654/0.4567567575622249 over 10 splits
+subject 15, avg accuracy 0.7684210538864136/0.3271999994874 over 10 splits
+subject 16, avg accuracy 0.776578950881958/0.3919354887739304 over 10 splits
+subject 17, avg accuracy 0.7578947335481644/0.35294117647058826 over 10 splits
+subject 18, avg accuracy 0.7903508722782135/0.29714285761117937 over 10 splits
+subject 19, avg accuracy 0.7175438642501831/0.3296703303908254 over 10 splits
+avg accuracy over all subjects 0.773060431248612/0.3550221043702773
+subject 1, avg accuracy 0.696198844909668/0.31333333522081375 over 10 splits
+subject 2, avg accuracy 0.7701754331588745/0.44594594671114074 over 10 splits
+subject 3, avg accuracy 0.8397660791873932/0.40538461538461534 over 10 splits
+subject 4, avg accuracy 0.7666666686534882/0.3791666666666666 over 10 splits
+subject 5, avg accuracy 0.8561403512954712/0.3238532122395454 over 10 splits
+subject 6, avg accuracy 0.7456140339374542/0.337190082533793 over 10 splits
+subject 7, avg accuracy 0.6964912235736846/0.3448275844256083 over 10 splits
+subject 8, avg accuracy 0.7842105269432068/0.37787610993976084 over 10 splits
+subject 9, avg accuracy 0.806725150346756/0.3289156627583216 over 10 splits
+subject 11, avg accuracy 0.7576023399829864/0.3510204081632653 over 10 splits
+subject 12, avg accuracy 0.7842105269432068/0.30421052399434534 over 10 splits
+subject 13, avg accuracy 0.8035087764263154/0.3415929212375025 over 10 splits
+subject 14, avg accuracy 0.7381579041481018/0.4216216225076366 over 10 splits
+subject 15, avg accuracy 0.8064327418804169/0.3503999991893768 over 10 splits
+subject 16, avg accuracy 0.7873684227466583/0.36935484370877664 over 10 splits
+subject 17, avg accuracy 0.7210526317358017/0.37058823529411766 over 10 splits
+subject 18, avg accuracy 0.7953216254711151/0.3185714290397507 over 10 splits
+subject 19, avg accuracy 0.7839181244373321/0.29230769240594173 over 10 splits
+avg accuracy over all subjects 0.7744200780987739/0.35423116063449883
+subject 1, avg accuracy 0.7128655016422272/0.3466666700111495 over 10 splits
+subject 2, avg accuracy 0.754678362607956/0.4283783797476743 over 10 splits
+subject 3, avg accuracy 0.8543859720230103/0.3515384615384615 over 10 splits
+subject 4, avg accuracy 0.7716374278068543/0.35520833333333335 over 10 splits
+subject 5, avg accuracy 0.8400584757328033/0.3183486242428285 over 10 splits
+subject 6, avg accuracy 0.7929824650287628/0.3413223135693014 over 10 splits
+subject 7, avg accuracy 0.6915204644203186/0.3057471260085873 over 10 splits
+subject 8, avg accuracy 0.7631578922271729/0.3504424815156818 over 10 splits
+subject 9, avg accuracy 0.8058479607105256/0.3325301202305828 over 10 splits
+subject 11, avg accuracy 0.7251461923122406/0.3704081632653061 over 10 splits
+subject 12, avg accuracy 0.7894736945629119/0.3199999973648473 over 10 splits
+subject 13, avg accuracy 0.7769005954265594/0.3212389389498044 over 10 splits
+subject 14, avg accuracy 0.7484210550785064/0.41891891956329347 over 10 splits
+subject 15, avg accuracy 0.8076023280620575/0.34959999938011166 over 10 splits
+subject 16, avg accuracy 0.8031578958034515/0.3790322628713423 over 10 splits
+subject 17, avg accuracy 0.7473684310913086/0.3661764705882353 over 10 splits
+subject 18, avg accuracy 0.7801169633865357/0.3057142862251827 over 10 splits
+subject 19, avg accuracy 0.7447368502616882/0.29230769257787814 over 10 splits
+avg accuracy over all subjects 0.7727810293436049/0.34742106894353336
+subject 1, avg accuracy 0.7400584757328034/0.31777778069178264 over 10 splits
+subject 2, avg accuracy 0.7383040964603425/0.39729729870686664 over 10 splits
+subject 3, avg accuracy 0.8274853825569153/0.3846153846153846 over 10 splits
+subject 4, avg accuracy 0.7505847990512848/0.365625 over 10 splits
+subject 5, avg accuracy 0.8716374218463898/0.3100917440078674 over 10 splits
+subject 6, avg accuracy 0.7347953140735626/0.3892561983594224 over 10 splits
+subject 7, avg accuracy 0.7184210598468781/0.32528735445491197 over 10 splits
+subject 8, avg accuracy 0.7789473712444306/0.35752212748063344 over 10 splits
+subject 9, avg accuracy 0.811695909500122/0.3216867468802326 over 10 splits
+subject 11, avg accuracy 0.7523391842842102/0.3908163265306122 over 10 splits
+subject 12, avg accuracy 0.7631578981876374/0.2926315763435866 over 10 splits
+subject 13, avg accuracy 0.7821637392044067/0.32035398369869306 over 10 splits
+subject 14, avg accuracy 0.7589473783969879/0.4418918931000941 over 10 splits
+subject 15, avg accuracy 0.8011695921421051/0.3463999990582466 over 10 splits
+subject 16, avg accuracy 0.776578950881958/0.3854838761110459 over 10 splits
+subject 17, avg accuracy 0.7210526287555694/0.3397058823529412 over 10 splits
+subject 18, avg accuracy 0.7561403572559356/0.26142857172659467 over 10 splits
+subject 19, avg accuracy 0.7845029354095459/0.32527472594609624 over 10 splits
+avg accuracy over all subjects 0.7704434719350602/0.348508137225834
+subject 1, avg accuracy 0.7236842066049576/0.3311111128992505 over 10 splits
+subject 2, avg accuracy 0.7330409348011017/0.42702702827550265 over 10 splits
+subject 3, avg accuracy 0.838596498966217/0.34615384615384615 over 10 splits
+subject 4, avg accuracy 0.7614035069942474/0.35625 over 10 splits
+subject 5, avg accuracy 0.8508771896362305/0.34587155994745566 over 10 splits
+subject 6, avg accuracy 0.7678362548351287/0.37355371969790496 over 10 splits
+subject 7, avg accuracy 0.687426894903183/0.2689655162822241 over 10 splits
+subject 8, avg accuracy 0.7684210538864136/0.36991150766874836 over 10 splits
+subject 9, avg accuracy 0.8119883120059967/0.29879518007657613 over 10 splits
+subject 11, avg accuracy 0.7517543852329254/0.3653061224489796 over 10 splits
+subject 12, avg accuracy 0.7578947424888611/0.3031578923526563 over 10 splits
+subject 13, avg accuracy 0.7771929919719696/0.3345132752329902 over 10 splits
+subject 14, avg accuracy 0.7905263245105744/0.4378378386835794 over 10 splits
+subject 15, avg accuracy 0.7622807025909424/0.3279999992489815 over 10 splits
+subject 16, avg accuracy 0.7713157832622528/0.43870968059186016 over 10 splits
+subject 17, avg accuracy 0.7473684191703797/0.275 over 10 splits
+subject 18, avg accuracy 0.7733918190002441/0.2842857147540365 over 10 splits
+subject 19, avg accuracy 0.7561403512954712/0.3219780226657679 over 10 splits
+avg accuracy over all subjects 0.768396687342061/0.3448015564989089
+subject 1, avg accuracy 0.7739766120910645/0.3055555571615696 over 10 splits
+subject 2, avg accuracy 0.732748544216156/0.41081081242174716 over 10 splits
+subject 3, avg accuracy 0.8497076094150543/0.3376923076923078 over 10 splits
+subject 4, avg accuracy 0.8043859720230102/0.3864583333333333 over 10 splits
+subject 5, avg accuracy 0.8669590651988983/0.317431193084345 over 10 splits
+subject 6, avg accuracy 0.7400584757328034/0.34545454640280115 over 10 splits
+subject 7, avg accuracy 0.626900589466095/0.2885057459617483 over 10 splits
+subject 8, avg accuracy 0.7578947395086288/0.35575221457840067 over 10 splits
+subject 9, avg accuracy 0.849122804403305/0.31445783049047715 over 10 splits
+subject 11, avg accuracy 0.7637426912784576/0.3918367346938776 over 10 splits
+subject 12, avg accuracy 0.7210526406764984/0.2778947348343698 over 10 splits
+subject 13, avg accuracy 0.8078947365283966/0.3460177004205442 over 10 splits
+subject 14, avg accuracy 0.7800000011920929/0.42972973039424095 over 10 splits
+subject 15, avg accuracy 0.7847953140735626/0.32720000036954877 over 10 splits
+subject 16, avg accuracy 0.7507894694805145/0.4048387141477677 over 10 splits
+subject 17, avg accuracy 0.7368421047925949/0.3029411764705882 over 10 splits
+subject 18, avg accuracy 0.7687134444713593/0.31571428631033216 over 10 splits
+subject 19, avg accuracy 0.7128654956817627/0.340659340773965 over 10 splits
+avg accuracy over all subjects 0.7682472394572364/0.34438616441899805
+subject 1, avg accuracy 0.7181286513805389/0.3244444462988112 over 10 splits
+subject 2, avg accuracy 0.7380117058753968/0.42297297442281573 over 10 splits
+subject 3, avg accuracy 0.8330409467220307/0.3553846153846154 over 10 splits
+subject 4, avg accuracy 0.8005848050117492/0.425 over 10 splits
+subject 5, avg accuracy 0.8833333253860474/0.3220183488699274 over 10 splits
+subject 6, avg accuracy 0.7669590711593628/0.33057851272919947 over 10 splits
+subject 7, avg accuracy 0.7181286633014679/0.297701147130166 over 10 splits
+subject 8, avg accuracy 0.842105257511139/0.3610619504894831 over 10 splits
+subject 9, avg accuracy 0.7900584757328033/0.2999999991382461 over 10 splits
+subject 11, avg accuracy 0.7687134504318237/0.3387755102040816 over 10 splits
+subject 12, avg accuracy 0.7631578981876374/0.2852631549145046 over 10 splits
+subject 13, avg accuracy 0.7871345043182373/0.3415929216067348 over 10 splits
+subject 14, avg accuracy 0.7536842226982117/0.42837837942548707 over 10 splits
+subject 15, avg accuracy 0.8122807025909424/0.3544000008702278 over 10 splits
+subject 16, avg accuracy 0.7826315879821777/0.438709681312884 over 10 splits
+subject 17, avg accuracy 0.6947368383407593/0.3602941176470589 over 10 splits
+subject 18, avg accuracy 0.7739766061305999/0.3200000003831728 over 10 splits
+subject 19, avg accuracy 0.7558479607105255/0.32197802212539617 over 10 splits
+avg accuracy over all subjects 0.7768063707484139/0.3515863212751562
+subject 1, avg accuracy 0.7128655016422272/0.32666666742828154 over 10 splits
+subject 2, avg accuracy 0.7488304018974304/0.456756757562225 over 10 splits
+subject 3, avg accuracy 0.8447368383407593/0.37 over 10 splits
+subject 4, avg accuracy 0.8093567252159118/0.3916666666666666 over 10 splits
+subject 5, avg accuracy 0.8239766061306/0.36238532212622676 over 10 splits
+subject 6, avg accuracy 0.7333333313465118/0.340495869012411 over 10 splits
+subject 7, avg accuracy 0.7131578981876373/0.30689655052519393 over 10 splits
+subject 8, avg accuracy 0.7631578981876374/0.36017699436803835 over 10 splits
+subject 9, avg accuracy 0.7321637481451034/0.3253012039216168 over 10 splits
+subject 11, avg accuracy 0.7850877225399018/0.33979591836734696 over 10 splits
+subject 12, avg accuracy 0.7526315748691559/0.263157892415398 over 10 splits
+subject 13, avg accuracy 0.7877192974090577/0.32123893922672864 over 10 splits
+subject 14, avg accuracy 0.7168421089649201/0.38378378454897855 over 10 splits
+subject 15, avg accuracy 0.8236842095851898/0.31679999926090235 over 10 splits
+subject 16, avg accuracy 0.7663157939910888/0.39032258497130484 over 10 splits
+subject 17, avg accuracy 0.7473684191703797/0.3382352941176471 over 10 splits
+subject 18, avg accuracy 0.7309941589832306/0.3300000004257474 over 10 splits
+subject 19, avg accuracy 0.7959064185619354/0.29670329565530296 over 10 splits
+avg accuracy over all subjects 0.76600714739826/0.34557687447777874
+subject 1, avg accuracy 0.7140350937843323/0.3166666684879197 over 10 splits
+subject 2, avg accuracy 0.7169590711593627/0.43783783816002514 over 10 splits
+subject 3, avg accuracy 0.834502923488617/0.3561538461538462 over 10 splits
+subject 4, avg accuracy 0.7453216433525085/0.36354166666666665 over 10 splits
+subject 5, avg accuracy 0.8514619886875152/0.3000000005058192 over 10 splits
+subject 6, avg accuracy 0.7836257338523864/0.35454545541982024 over 10 splits
+subject 7, avg accuracy 0.6713450372219085/0.29195402112157864 over 10 splits
+subject 8, avg accuracy 0.7842105269432068/0.3654867277999895 over 10 splits
+subject 9, avg accuracy 0.790350878238678/0.28674698798771364 over 10 splits
+subject 11, avg accuracy 0.7690058529376984/0.36020408163265305 over 10 splits
+subject 12, avg accuracy 0.7894736945629119/0.305263155290955 over 10 splits
+subject 13, avg accuracy 0.802923983335495/0.34601770026230183 over 10 splits
+subject 14, avg accuracy 0.7489473789930343/0.4797297306962915 over 10 splits
+subject 15, avg accuracy 0.8289473652839661/0.3551999999284744 over 10 splits
+subject 16, avg accuracy 0.7878947377204895/0.39354839127871294 over 10 splits
+subject 17, avg accuracy 0.7473684132099152/0.34705882352941186 over 10 splits
+subject 18, avg accuracy 0.7690058529376984/0.2942857149243355 over 10 splits
+subject 19, avg accuracy 0.7888888895511628/0.3153846164817338 over 10 splits
+avg accuracy over all subjects 0.773570503625605/0.3483125236849027
+subject 1, avg accuracy 0.7350877285003662/0.33222222404347523 over 10 splits
+subject 2, avg accuracy 0.7105263233184814/0.44054054158764916 over 10 splits
+subject 3, avg accuracy 0.8441520512104035/0.35384615384615387 over 10 splits
+subject 4, avg accuracy 0.7938596546649933/0.38541666666666663 over 10 splits
+subject 5, avg accuracy 0.8450292527675629/0.3155963311501599 over 10 splits
+subject 6, avg accuracy 0.7447368383407593/0.35702479452141056 over 10 splits
+subject 7, avg accuracy 0.739473682641983/0.2862068962691159 over 10 splits
+subject 8, avg accuracy 0.7736842155456543/0.36371681727139293 over 10 splits
+subject 9, avg accuracy 0.7959064364433288/0.32650602508381193 over 10 splits
+subject 11, avg accuracy 0.7520467877388001/0.32448979591836735 over 10 splits
+subject 12, avg accuracy 0.8000000059604645/0.29684210275348866 over 10 splits
+subject 13, avg accuracy 0.7438596487045288/0.33008849736863527 over 10 splits
+subject 14, avg accuracy 0.7639473617076874/0.4175675683126256 over 10 splits
+subject 15, avg accuracy 0.8064327478408814/0.37360000021457673 over 10 splits
+subject 16, avg accuracy 0.7452631592750549/0.43870968001504096 over 10 splits
+subject 17, avg accuracy 0.7263157904148102/0.32500000000000007 over 10 splits
+subject 18, avg accuracy 0.7523391842842102/0.31428571496691027 over 10 splits
+subject 19, avg accuracy 0.7450292408466339/0.31098901093988635 over 10 splits
+avg accuracy over all subjects 0.7676494505670336/0.3495916011627427
+subject 1, avg accuracy 0.6801169693470002/0.328888890710142 over 10 splits
+subject 2, avg accuracy 0.7269005954265595/0.4135135139967945 over 10 splits
+subject 3, avg accuracy 0.860818725824356/0.34923076923076934 over 10 splits
+subject 4, avg accuracy 0.7391812860965729/0.328125 over 10 splits
+subject 5, avg accuracy 0.8035087704658508/0.3192660557157403 over 10 splits
+subject 6, avg accuracy 0.7412280738353729/0.3214876034905102 over 10 splits
+subject 7, avg accuracy 0.6921052634716034/0.32873563086506963 over 10 splits
+subject 8, avg accuracy 0.7526315867900848/0.3637168173768879 over 10 splits
+subject 9, avg accuracy 0.7845029354095459/0.3132530114018774 over 10 splits
+subject 11, avg accuracy 0.7476608157157898/0.3704081632653061 over 10 splits
+subject 12, avg accuracy 0.7421052634716034/0.31473683956422305 over 10 splits
+subject 13, avg accuracy 0.7812865555286408/0.3070796473495728 over 10 splits
+subject 14, avg accuracy 0.737894743680954/0.47567567708524494 over 10 splits
+subject 15, avg accuracy 0.7625730931758881/0.31359999978542324 over 10 splits
+subject 16, avg accuracy 0.7718421161174774/0.40967742271961705 over 10 splits
+subject 17, avg accuracy 0.7421052634716034/0.35294117647058826 over 10 splits
+subject 18, avg accuracy 0.7900584757328033/0.2500000005960464 over 10 splits
+subject 19, avg accuracy 0.7558479547500611/0.3131868141365575 over 10 splits
+avg accuracy over all subjects 0.7562426937950983/0.3429735018755761
+subject 1, avg accuracy 0.6970760226249695/0.30666666958067157 over 10 splits
+subject 2, avg accuracy 0.7210526406764984/0.44189189269736007 over 10 splits
+subject 3, avg accuracy 0.8505847871303558/0.35384615384615387 over 10 splits
+subject 4, avg accuracy 0.7956140398979187/0.384375 over 10 splits
+subject 5, avg accuracy 0.8461988270282745/0.34036697296921264 over 10 splits
+subject 6, avg accuracy 0.7087719231843949/0.3371900833465836 over 10 splits
+subject 7, avg accuracy 0.7236842095851899/0.3229885040857326 over 10 splits
+subject 8, avg accuracy 0.7684210538864136/0.3663716848708887 over 10 splits
+subject 9, avg accuracy 0.7739766120910645/0.3132530112672284 over 10 splits
+subject 11, avg accuracy 0.8181286513805389/0.3540816326530612 over 10 splits
+subject 12, avg accuracy 0.7210526287555694/0.28947368160674447 over 10 splits
+subject 13, avg accuracy 0.7652046799659729/0.3389380546797693 over 10 splits
+subject 14, avg accuracy 0.737894743680954/0.4567567575219515 over 10 splits
+subject 15, avg accuracy 0.7684210479259491/0.305600000822544 over 10 splits
+subject 16, avg accuracy 0.7713157892227173/0.39838710110033715 over 10 splits
+subject 17, avg accuracy 0.768421059846878/0.3397058823529412 over 10 splits
+subject 18, avg accuracy 0.7467836201190948/0.29714285786662786 over 10 splits
+subject 19, avg accuracy 0.7730994164943695/0.32087912132124324 over 10 splits
+avg accuracy over all subjects 0.7642056529720622/0.3482175034771695
+subject 1, avg accuracy 0.6745614111423492/0.3300000022186173 over 10 splits
+subject 2, avg accuracy 0.7219298332929611/0.39459459535978947 over 10 splits
+subject 3, avg accuracy 0.8611111104488373/0.3384615384615385 over 10 splits
+subject 4, avg accuracy 0.7441520422697068/0.3927083333333333 over 10 splits
+subject 5, avg accuracy 0.8780701756477356/0.3293577986846276 over 10 splits
+subject 6, avg accuracy 0.7663742780685425/0.33140495939195647 over 10 splits
+subject 7, avg accuracy 0.7491228103637695/0.27471264283890007 over 10 splits
+subject 8, avg accuracy 0.7315789520740509/0.35132743674041944 over 10 splits
+subject 9, avg accuracy 0.8225146293640136/0.34096385646297267 over 10 splits
+subject 11, avg accuracy 0.7792397618293763/0.3397959183673469 over 10 splits
+subject 12, avg accuracy 0.7421052753925323/0.29684210269074696 over 10 splits
+subject 13, avg accuracy 0.7973684310913086/0.29469026679222565 over 10 splits
+subject 14, avg accuracy 0.8165789544582367/0.45675675740113136 over 10 splits
+subject 15, avg accuracy 0.8289473652839661/0.3223999996185303 over 10 splits
+subject 16, avg accuracy 0.7452631652355194/0.42096774664617354 over 10 splits
+subject 17, avg accuracy 0.789473682641983/0.33382352941176474 over 10 splits
+subject 18, avg accuracy 0.7961988270282745/0.27142857193946834 over 10 splits
+subject 19, avg accuracy 0.7397660851478577/0.3142857140237158 over 10 splits
+avg accuracy over all subjects 0.7769087105989455/0.3408067650212921
+subject 1, avg accuracy 0.7239766120910645/0.31000000273187955 over 10 splits
+subject 2, avg accuracy 0.7166666626930237/0.42297297450336246 over 10 splits
+subject 3, avg accuracy 0.8543859601020813/0.3684615384615385 over 10 splits
+subject 4, avg accuracy 0.7850877225399018/0.39895833333333336 over 10 splits
+subject 5, avg accuracy 0.8561403512954712/0.3559633034221623 over 10 splits
+subject 6, avg accuracy 0.7450292408466339/0.3280991737877042 over 10 splits
+subject 7, avg accuracy 0.6868421077728272/0.3367816082191194 over 10 splits
+subject 8, avg accuracy 0.8105263233184814/0.3646017739203124 over 10 splits
+subject 9, avg accuracy 0.7792397797107696/0.3469879516995097 over 10 splits
+subject 11, avg accuracy 0.735672515630722/0.4040816326530612 over 10 splits
+subject 12, avg accuracy 0.7578947484493256/0.3199999972393638 over 10 splits
+subject 13, avg accuracy 0.7865497231483459/0.33628318698796555 over 10 splits
+subject 14, avg accuracy 0.7802631616592407/0.406756757964959 over 10 splits
+subject 15, avg accuracy 0.7736842036247253/0.33519999973773956 over 10 splits
+subject 16, avg accuracy 0.7397368371486663/0.3661290368245494 over 10 splits
+subject 17, avg accuracy 0.7578947365283966/0.3352941176470588 over 10 splits
+subject 18, avg accuracy 0.7570175409317017/0.284285714839186 over 10 splits
+subject 19, avg accuracy 0.7517543911933899/0.32967033007970226 over 10 splits
+avg accuracy over all subjects 0.7665757010380427/0.35280707966958375
+acc 0.7562426937950983/0.3429735018755761
+
+acc 0.7577777817845344/0.3449850418547495
+
+acc 0.7584714127911462/0.3404147193859023
+
+acc 0.7587735546959771/0.34709937811303915
+
+acc 0.758905133770572/0.33989474571283707
+
+acc 0.7595386619369191/0.34826187844995626
+
+acc 0.7605994193090333/0.34471991980078553
+
+acc 0.7607748563090959/0.3487000339692026
+
+acc 0.7621475024355783/0.3477718531777478
+
+acc 0.7623521791564094/0.3453352723566921
+
+acc 0.7636517243252858/0.35077266027997567
+
+acc 0.7642056529720622/0.3482175034771695
+
+acc 0.7644476948512926/0.3464962638852523
+
+acc 0.7653053940998182/0.34961624544306036
+
+acc 0.7654012358850903/0.35152818281176323
+
+acc 0.7658788199226061/0.3495770759491064
+
+acc 0.76600714739826/0.34557687447777874
+
+acc 0.7660899958676762/0.34827165254055154
+
+acc 0.7660932413405841/0.34386388610315044
+
+acc 0.7664002607266107/0.3397971042716425
+
+acc 0.7665074768993589/0.34087502150030774
+
+acc 0.7665757010380427/0.35280707966958375
+
+acc 0.7666796657774183/0.3458320804184324
+
+acc 0.7669298264715407/0.3525448217820091
+
+acc 0.7669493200050459/0.350209747569925
+
+acc 0.7674886312749652/0.3533774281201689
+
+acc 0.7676494505670336/0.3495916011627427
+
+acc 0.7678898655705982/0.33863868096066746
+
+acc 0.7681465259856648/0.35636167820066655
+
+acc 0.7682472394572364/0.34438616441899805
+
+acc 0.7683755695819855/0.35289809083433954
+
+acc 0.768396687342061/0.3448015564989089
+
+acc 0.7685542586776944/0.3457350189728264
+
+acc 0.7685867458581925/0.34597430964412357
+
+acc 0.7688271625174417/0.3501111186667361
+
+acc 0.7690692019131448/0.34690825457273483
+
+acc 0.7696669917967585/0.3511885534526939
+
+acc 0.7697807027233972/0.3477585285636736
+
+acc 0.7700162458750939/0.3505301510937462
+
+acc 0.7704434719350602/0.348508137225834
+
+acc 0.7706205346518094/0.3424595950366073
+
+acc 0.7706838872697618/0.33874953791880286
+
+acc 0.7712556867135896/0.3445281325351347
+
+acc 0.7715968175066843/0.35173516963527657
+
+acc 0.7716504229439631/0.34898656598147676
+
+acc 0.7718063698874581/0.343224187335392
+
+acc 0.7718567265404596/0.35040005807852453
+
+acc 0.7719558164477348/0.35204884356347815
+
+acc 0.7720808967947961/0.34311751393540013
+
+acc 0.7720987669295734/0.3454731082999412
+
+acc 0.7721150113476649/0.345774372821919
+
+acc 0.7723586764600541/0.35306739566694234
+
+acc 0.7726738169789314/0.3456597129195433
+
+acc 0.7727810293436049/0.34742106894353336
+
+acc 0.7728687466846572/0.34663930345984595
+
+acc 0.773060431248612/0.3550221043702773
+
+acc 0.7731384058793386/0.3421594454548915
+
+acc 0.7734632910953628/0.3539173636002343
+
+acc 0.7735396381881503/0.3418722740173143
+
+acc 0.7735688785711923/0.34951102211250695
+
+acc 0.773570503625605/0.3483125236849027
+
+acc 0.7736143607232308/0.3414526181868535
+
+acc 0.7736793400512804/0.35166581625227633
+
+acc 0.7736858384476767/0.3434731454207488
+
+acc 0.7737589342726602/0.3466402463137312
+
+acc 0.7739928550190396/0.35086913190260743
+
+acc 0.7742170261012183/0.3505884621705831
+
+acc 0.7744200780987739/0.35423116063449883
+
+acc 0.774653998348448/0.34065445061579563
+
+acc 0.7748473034964669/0.3489650985269933
+
+acc 0.7753346333901088/0.3421736077663129
+
+acc 0.775349256230725/0.3418692836165549
+
+acc 0.7754922055535847/0.35039734970835235
+
+acc 0.7755636793043877/0.3398357458957048
+
+acc 0.775739120443662/0.3428900998761349
+
+acc 0.775836584965388/0.352527348644395
+
+acc 0.7759291758139928/0.3440161166119201
+
+acc 0.776476609872447/0.34551093246040016
+
+acc 0.7765643280413417/0.3451252670395746
+
+acc 0.7768063707484139/0.3515863212751562
+
+acc 0.7769087105989455/0.3408067650212921
+
+acc 0.7770419105887414/0.3490671366481829
+
+acc 0.7771702430314489/0.3430384502412318
+
+acc 0.7773473060793348/0.3440015862577577
+
+acc 0.7773992869589065/0.35101694240121584
+
+acc 0.777412283089426/0.3504233412573439
+
+acc 0.7778736222121451/0.3510798832867599
+
+acc 0.7782894753747517/0.34382835338421724
+
+acc 0.778338209953573/0.3455565959566104
+
+acc 0.779459066854583/0.35251737876506867
+
+acc 0.7798326861527232/0.3485691255715062
+
+acc 0.7798603021436267/0.3532825220405576
+
+acc 0.7799772601988582/0.3424280066862918
+
+acc 0.7799918787346947/0.34894864175106277
+
+acc 0.7805458111895456/0.3424724160598144
+
+acc 0.7805977922346856/0.3476710697228119
+
+acc 0.7809145589669545/0.3516016087880013
+
+acc 0.7838758943809404/0.34734341742438074
+
+acc 0.7840383367405998/0.3454551618657861
+
+acc 0.7863352851735219/0.3558386990698075
+
+avg over all trials and subjects 0.7715176107933126/0.3472241042175529
+end time
+Thu Mar 15 05:32:12 CET 2018

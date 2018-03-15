@@ -11,7 +11,7 @@ from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalizatio
 from keras.layers import TimeDistributed, Lambda, AlphaDropout
 from keras.layers import SimpleRNN, RNN, LSTM, GRU
 from keras.layers import Conv1D, MaxPooling1D, Flatten
-from keras.layers import ELU, PReLU, Activation, AveragePooling1D
+from keras.layers import ELU, PReLU, Activation
 
 from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
@@ -32,7 +32,7 @@ print(x[0].shape)
 splits = 10
 n_subs = len(x)
 n_models = 20
-n_evaliter = 10
+n_evaliter = 100
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
@@ -52,7 +52,7 @@ def gen_model():
 
 
 def offset_slice(inputs):
-    w = 630
+    w = 530
     r = np.random.randint(inputs.shape[1] - w + 1)
     return inputs[:, r:r + w, :]
 
@@ -62,31 +62,31 @@ for j in range(n_models):
     msets[j] = " " #mset
 
     m_in = Input(shape=x[0][0].shape)
-    m_off = Lambda(offset_slice)(m_in)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+    m_t = Lambda(offset_slice)(m_in)
+    m_t = GaussianNoiseAlways(np.std(x[0][0] / 70))(m_t) # how much noice to have????
 
-    m_t = Conv1D(20, 10, padding='causal')(m_noise)
+    m_t = Conv1D(30, 10, padding='causal')(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
-    m_t = Conv1D(20, 5, padding='causal')(m_t)
+    m_t = Conv1D(30, 5, padding='causal')(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
-    m_t = Conv1D(40, 5, padding='causal')(m_t)
+    m_t = Conv1D(30, 5, padding='causal')(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = MaxPooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
     m_t = Flatten()(m_t)
-    # m_t = Dense(50)(m_t)
-    # m_t = BatchNormalization()(m_t)
-    # m_t = Activation('tanh')(m_t)
+    m_t = Dense(50)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
     m_t = Dense(20)(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = Activation('tanh')(m_t)
@@ -95,7 +95,7 @@ for j in range(n_models):
     model = Model(inputs=m_in, outputs=m_out)
 
     model.compile(loss='categorical_crossentropy',
-                  optimizer='adam',
+                  optimizer='rmsprop',
                   metrics=['accuracy'])
 
     if j == 0:
@@ -118,10 +118,20 @@ for j in range(n_models):
                           batch_size=64, epochs=200, verbose=0)
             h = h.history
 
-            _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
-            _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
-            acc += a
-            acc2 += a2
+            p1 = np.zeros(y[i][val].shape)
+            p2 = np.zeros(yt[i].shape)
+            for i2 in range(n_evaliter):
+                p1 += model.predict(x[i][val])
+                p2 += model.predict(xt[i])
+
+            p1 /= n_evaliter
+            p2 /= n_evaliter
+
+            acc += np.mean(np.equal(np.argmax(p1, axis=-1),
+                                    np.argmax(y[i][val], axis=-1)))
+            acc2 += np.mean(np.equal(np.argmax(p2, axis=-1),
+                                     np.argmax(yt[i], axis=-1)))
+
 
         acc /= splits
         acc2 /= splits
