@@ -5,7 +5,7 @@ import numpy as np
 
 from keras.models import Model
 from keras.layers import Dense, Dropout, Input, BatchNormalization
-from keras.layers import AveragePooling2D, SeparableConv2D
+from keras.layers import AveragePooling2D, SeparableConv2D, DepthwiseConv2D
 from keras.layers import Conv2D, Flatten
 from keras.layers import ELU, Reshape
 
@@ -39,10 +39,15 @@ for j in range(n_models):
 
     m_t = Conv2D(F, (256, 1), padding='same')(m_t)
     m_t = BatchNormalization()(m_t)
-    m_t = SeparableConv2D(F, (1, C), padding='valid')(m_t)
+    print(m_t._keras_shape)
+    m_t = DepthwiseConv2D((1, C), depth_multiplier=1, padding='valid')(m_t)
+    print(m_t._keras_shape)
     m_t = BatchNormalization()(m_t)
+    print(m_t._keras_shape)
     m_t = ELU()(m_t)
+    print(m_t._keras_shape)
     m_t = Dropout(0.25, noise_shape=(1, 1, F))(m_t)
+    print(m_t._keras_shape)
 
     m_t = SeparableConv2D(F, (8, 1), padding='same')(m_t)
     m_t = BatchNormalization()(m_t)
@@ -83,7 +88,8 @@ for j in range(n_models):
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
-                          batch_size=64, epochs=500, verbose=0)
+                          validation_data=(x[i][val], y[i][val]),
+                          batch_size=64, epochs=500, verbose=1)
             h = h.history
 
 
