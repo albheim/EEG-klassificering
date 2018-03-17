@@ -32,13 +32,15 @@ accs2 = [0 for j in range(n_models)]
 for j in range(n_models):
 
     T, C = x[0][0].shape
-    F = 8
     N = 3
+    samp_freq = 512
+
+    F = 32
 
     m_in = Input(shape=(T, C))
     m_t = Reshape((T, C, 1))(m_in)
 
-    m_t = Conv2D(F, (256, 1), padding='same',
+    m_t = Conv2D(F, (samp_freq / 2, 1), padding='same',
                  kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = DepthwiseConv2D((1, C), depth_multiplier=1, padding='valid',
