@@ -39,16 +39,17 @@ accs2 = [0 for j in range(n_models)]
 
 
 def gen_model():
-    return {"l1_nodes": 30, #np.random.randint(10, 40),
-            "l1_filter": 10, #np.random.randint(5, 30),
-            "l1_dropout": 0.2, #np.random.ranf() * 0.75,
-            "l2_nodes": 20, #np.random.randint(5, 30),
-            "l2_filter": 5, #np.random.randint(4, 20),
-            "l2_dropout": 0.2, #np.random.ranf() * 0.75,
-            "l3_nodes": 10, #np.random.randint(1, 15),
-            "l3_filter": 5, #np.random.randint(2, 15),
-            "l3_dropout": 0.001, #np.random.ranf() * 0.75,
-            "dense_nodes": 30} #np.random.randint(5, 50)}
+    return {"l1_nodes": np.random.randint(10, 40),
+            "l1_filter": np.random.randint(5, 30),
+            "l1_dropout": np.random.ranf() * 0.75,
+            "l2_nodes": np.random.randint(5, 30),
+            "l2_filter": np.random.randint(4, 20),
+            "l2_dropout": np.random.ranf() * 0.75,
+            "l3_nodes": np.random.randint(1, 15),
+            "l3_filter": np.random.randint(2, 15),
+            "l3_dropout": np.random.ranf() * 0.75,
+            "dense_nodes_1": np.random.randint(5, 50),
+            "dense_nodes_2": np.random.randint(5, 50)}
 
 
 def offset_slice(inputs):
@@ -59,7 +60,7 @@ def offset_slice(inputs):
 for j in range(n_models):
 
     mset = gen_model()
-    msets[j] = " " #mset
+    msets[j] = mset
 
     m_in = Input(shape=x[0][0].shape)
     m_off = Lambda(offset_slice)(m_in)
@@ -94,15 +95,10 @@ for j in range(n_models):
 
     model = Model(inputs=m_in, outputs=m_out)
 
-    model.compile(loss='categorical_crossentropy',
-                  optimizer='adam',
-                  metrics=['accuracy'])
-
+    m_save = model.get_config()
     if j == 0:
         model.summary()
 
-
-    w_save = model.get_weights()
     avgacc = 0
     avgacc2 = 0
     for i in range(n_subs):
@@ -110,8 +106,11 @@ for j in range(n_models):
         acc = 0
         acc2 = 0
         for tr, val in util.kfold(n, splits):
-            # reset to initial weights
-            model.set_weights(w_save)
+            # recreate model
+            model = Model.from_config(m_save)
+            model.compile(loss='categorical_crossentropy',
+                          optimizer='adam',
+                          metrics=['accuracy'])
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
