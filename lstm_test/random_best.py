@@ -31,8 +31,7 @@ print(x[0].shape)
 
 splits = 10
 n_subs = len(x)
-n_models = 20
-n_evaliter = 10
+n_models = 50
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
@@ -40,16 +39,16 @@ accs2 = [0 for j in range(n_models)]
 
 def gen_model():
     return {"l1_nodes": np.random.randint(10, 40),
-            "l1_filter": np.random.randint(5, 30),
+            "l1_filter": np.random.randint(5, 50),
             "l1_dropout": np.random.ranf() * 0.75,
-            "l2_nodes": np.random.randint(5, 30),
-            "l2_filter": np.random.randint(4, 20),
+            "l2_nodes": np.random.randint(10, 30),
+            "l2_filter": np.random.randint(8, 25),
             "l2_dropout": np.random.ranf() * 0.75,
-            "l3_nodes": np.random.randint(1, 15),
-            "l3_filter": np.random.randint(2, 15),
+            "l3_nodes": np.random.randint(5, 20),
+            "l3_filter": np.random.randint(4, 15),
             "l3_dropout": np.random.ranf() * 0.75,
             "dense_nodes_1": np.random.randint(5, 50),
-            "dense_nodes_2": np.random.randint(5, 50)}
+            "dense_nodes_2": np.random.randint(5, 30)}
 
 
 def offset_slice(inputs):
@@ -60,35 +59,35 @@ def offset_slice(inputs):
 for j in range(n_models):
 
     mset = gen_model()
-    msets[j] = " " # mset
+    msets[j] = mset
 
     m_in = Input(shape=x[0][0].shape)
     m_off = Lambda(offset_slice)(m_in)
     m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
 
-    m_t = Conv1D(30, 10, padding='causal')(m_noise)
+    m_t = Conv1D(mset["l1_nodes"], mset["l1_filter"], padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+    m_t = Dropout(mset["l1_dropout"])(m_t)
 
-    m_t = Conv1D(30, 5, padding='causal')(m_t)
+    m_t = Conv1D(mset["l2_nodes"], mset["l2_filter"], padding='causal')(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+    m_t = Dropout(mset["l2_dropout"])(m_t)
 
-    m_t = Conv1D(30, 5, padding='causal')(m_t)
+    m_t = Conv1D(mset["l3_nodes"], mset["l3_filter"], padding='causal')(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+    m_t = Dropout(mset["l3_dropout"])(m_t)
 
     m_t = Flatten()(m_t)
-    m_t = Dense(50)(m_t)
+    m_t = Dense(mset["dense_nodes_1"])(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = Activation('tanh')(m_t)
-    m_t = Dense(20)(m_t)
+    m_t = Dense(mset["dense_nodes_2"])(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = Activation('tanh')(m_t)
     m_out = Dense(3, activation='softmax')(m_t)
@@ -96,8 +95,7 @@ for j in range(n_models):
     model = Model(inputs=m_in, outputs=m_out)
 
     m_save = model.get_config()
-    if j == 0:
-        model.summary()
+    model.summary()
 
     avgacc = 0
     avgacc2 = 0
@@ -106,7 +104,7 @@ for j in range(n_models):
         acc = 0
         acc2 = 0
         for tr, val in util.kfold(n, splits):
-            # recreate model
+            # reset to initial weights
             model = Model.from_config(m_save)
             model.compile(loss='categorical_crossentropy',
                           optimizer='adam',

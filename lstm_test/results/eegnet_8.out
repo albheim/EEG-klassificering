@@ -1,0 +1,456 @@
+data dir
+/lunarc/nobackup/users/albheim/EEG-klassificering/DATA
+script
+#!/bin/sh
+#SBATCH -t 60:00:00
+#SBATCH -J vieegnet
+#SBATCH -A lu2018-2-3
+#// SBATCH -o stdout_%j.out
+#// SBATCH -e stderr_%j.err
+
+# shold be lu or gpu
+#SBATCH -p gpu
+
+# how many gpus, 4 per node, using many seems to crash more often so stick with 1
+#SBATCH --gres=gpu:1
+
+# use 5 cores per GPU
+#SBATCH -n 5
+#SBATCH --mem-per-cpu=3100
+
+DATA_DIR="$(cat ../data_location.txt)"
+echo "data dir"
+echo $DATA_DIR
+
+echo "script"
+cat $0
+
+PY_FILE="eegnet.py"
+echo "py file"
+cat $PY_FILE
+
+echo "nvidia smi"
+nvidia-smi
+
+echo "start time"
+date
+
+cp -r $DATA_DIR $SNIC_TMP
+ls $SNIC_TMP
+du -h "${SNIC_TMP}/DATA"
+
+echo "copy done time"
+date
+
+python $PY_FILE $SNIC_TMP
+
+echo "end time"
+date
+py file
+import util
+import data
+
+import numpy as np
+
+from keras.models import Model
+from keras.layers import Dense, Dropout, Input, BatchNormalization
+from keras.layers import AveragePooling2D, SeparableConv2D, DepthwiseConv2D
+from keras.layers import Conv2D, Flatten
+from keras.layers import ELU, Reshape
+from keras import regularizers
+
+from keras import backend as K
+
+from tensorflow.python.client import device_lib
+print(device_lib.list_local_devices())
+
+
+x, y = data.load_single(cut=True, visual=True, transpose=True)
+xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
+print(x[0].shape, xt[0].shape)
+
+splits = 10
+n_subs = len(x)
+n_models = 3
+n_evaliter = 10
+msets = [None for j in range(n_models)]
+accs = [0 for j in range(n_models)]
+accs2 = [0 for j in range(n_models)]
+
+
+for j in range(n_models):
+
+    T, C = x[0][0].shape
+    F = 8
+    N = 3
+
+    m_in = Input(shape=(T, C))
+    m_t = Reshape((T, C, 1))(m_in)
+
+    m_t = Conv2D(F, (256, 1), padding='same',
+                 kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = DepthwiseConv2D((1, C), depth_multiplier=1, padding='valid',
+                          kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = Dropout(0.25, noise_shape=(1, 1, F))(m_t)
+    # print(m_t._keras_shape)
+
+    m_t = SeparableConv2D(F, (8, 1), padding='same',
+                          kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling2D((4, 1))(m_t)
+    m_t = Dropout(0.25, noise_shape=(1, 1, F))(m_t)
+
+    m_t = SeparableConv2D(2 * F, (8, 1), padding='same',
+                          kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling2D((4, 1))(m_t)
+    m_t = Dropout(0.25, noise_shape=(1, 1, 2 * F))(m_t)
+
+
+    m_t = Flatten()(m_t)
+    m_out = Dense(3, activation='softmax')(m_t)
+
+    model = Model(inputs=m_in, outputs=m_out)
+
+    model.compile(loss='categorical_crossentropy',
+                  optimizer='adam',
+                  metrics=['accuracy'])
+
+    if j == 0:
+        model.summary()
+
+
+    w_save = model.get_weights()
+    avgacc = 0
+    avgacc2 = 0
+    for i in range(n_subs):
+        n = x[i].shape[0]
+        acc = 0
+        acc2 = 0
+        for tr, val in util.kfold(n, splits):
+            # reset to initial weights
+            model.set_weights(w_save)
+
+            # fit with next kfold data
+            h = model.fit(x[i][tr], y[i][tr],
+                          batch_size=64, epochs=500, verbose=0)
+            h = h.history
+
+
+            _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
+            _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
+
+            acc += a
+            acc2 += a2
+
+
+        acc /= splits
+        acc2 /= splits
+        avgacc += acc
+        avgacc2 += acc2
+
+        print("subject {}, avg accuracy {}/{} over {} splits".format(i + 1 if i + 1 < 10 else i + 2,
+                                                                     acc, acc2, splits))
+
+    avgacc /= n_subs
+    accs[j] = avgacc
+    avgacc2 /= n_subs
+    accs2[j] = avgacc2
+    print("avg accuracy over all subjects {}/{}".format(avgacc, avgacc2))
+
+
+for a, a2 in sorted(zip(accs, accs2)):
+    print("acc {}/{}\n".format(a, a2))
+
+print("avg over all trials and subjects {}/{}".format(sum(accs) / len(accs), sum(accs2) / len(accs2)))
+nvidia smi
+Thu Mar 15 20:02:16 2018       
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 384.81                 Driver Version: 384.81                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla K80           On   | 00000000:04:00.0 Off |                    0 |
+| N/A   44C    P0    99W / 149W |  10974MiB / 11439MiB |     58%      Default |
++-------------------------------+----------------------+----------------------+
+|   1  Tesla K80           On   | 00000000:05:00.0 Off |                    0 |
+| N/A   55C    P8    31W / 149W |      1MiB / 11439MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   2  Tesla K80           On   | 00000000:84:00.0 Off |                    0 |
+| N/A   49C    P0   104W / 149W |  10974MiB / 11439MiB |     57%      Default |
++-------------------------------+----------------------+----------------------+
+|   3  Tesla K80           On   | 00000000:85:00.0 Off |                    0 |
+| N/A   72C    P0   121W / 149W |  10974MiB / 11439MiB |     53%      Default |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|    0    330135      C   python                                     10961MiB |
+|    2    330698      C   python                                     10961MiB |
+|    3    331102      C   python                                     10961MiB |
++-----------------------------------------------------------------------------+
+start time
+Thu Mar 15 20:02:16 CET 2018
+DATA
+2.4G	/local/slurmtmp.526521/DATA/Visual
+2.4G	/local/slurmtmp.526521/DATA/Verbal
+388M	/local/slurmtmp.526521/DATA/Modified/marginal
+388M	/local/slurmtmp.526521/DATA/Modified
+5.1G	/local/slurmtmp.526521/DATA
+copy done time
+Thu Mar 15 20:03:14 CET 2018
+2018-03-15 20:03:16.207946: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-03-15 20:03:16.466072: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-03-15 20:03:16.466185: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-03-15 20:03:35.652691: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 14921431769628382320
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11324823962
+locality {
+  bus_id: 1
+}
+incarnation: 13241720841939798973
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+]
+loading:  Subj01_CleanData_study_FA
+loading:  Subj01_CleanData_study_LM
+loading:  Subj01_CleanData_study_OB
+loading:  Subj02_CleanData_study_FA
+loading:  Subj02_CleanData_study_LM
+loading:  Subj02_CleanData_study_OB
+loading:  Subj03_CleanData_study_FA
+loading:  Subj03_CleanData_study_LM
+loading:  Subj03_CleanData_study_OB
+loading:  Subj04_CleanData_study_FA
+loading:  Subj04_CleanData_study_LM
+loading:  Subj04_CleanData_study_OB
+loading:  Subj05_CleanData_study_FA
+loading:  Subj05_CleanData_study_LM
+loading:  Subj05_CleanData_study_OB
+loading:  Subj06_CleanData_study_FA
+loading:  Subj06_CleanData_study_LM
+loading:  Subj06_CleanData_study_OB
+loading:  Subj07_CleanData_study_FA
+loading:  Subj07_CleanData_study_LM
+loading:  Subj07_CleanData_study_OB
+loading:  Subj08_CleanData_study_FA
+loading:  Subj08_CleanData_study_LM
+loading:  Subj08_CleanData_study_OB
+loading:  Subj09_CleanData_study_FA
+loading:  Subj09_CleanData_study_LM
+loading:  Subj09_CleanData_study_OB
+loading:  Subj11_CleanData_study_FA
+loading:  Subj11_CleanData_study_LM
+loading:  Subj11_CleanData_study_OB
+loading:  Subj12_CleanData_study_FA
+loading:  Subj12_CleanData_study_LM
+loading:  Subj12_CleanData_study_OB
+loading:  Subj13_CleanData_study_FA
+loading:  Subj13_CleanData_study_LM
+loading:  Subj13_CleanData_study_OB
+loading:  Subj14_CleanData_study_FA
+loading:  Subj14_CleanData_study_LM
+loading:  Subj14_CleanData_study_OB
+loading:  Subj15_CleanData_study_FA
+loading:  Subj15_CleanData_study_LM
+loading:  Subj15_CleanData_study_OB
+loading:  Subj16_CleanData_study_FA
+loading:  Subj16_CleanData_study_LM
+loading:  Subj16_CleanData_study_OB
+loading:  Subj17_CleanData_study_FA
+loading:  Subj17_CleanData_study_LM
+loading:  Subj17_CleanData_study_OB
+loading:  Subj18_CleanData_study_FA
+loading:  Subj18_CleanData_study_LM
+loading:  Subj18_CleanData_study_OB
+loading:  Subj19_CleanData_study_FA
+loading:  Subj19_CleanData_study_LM
+loading:  Subj19_CleanData_study_OB
+(185, 768, 31)
+loading:  Subj01_CleanData_test_FA_visual
+loading:  Subj01_CleanData_test_LM_visual
+loading:  Subj01_CleanData_test_OB_visual
+loading:  Subj02_CleanData_test_FA_visual
+loading:  Subj02_CleanData_test_LM_visual
+loading:  Subj02_CleanData_test_OB_visual
+loading:  Subj03_CleanData_test_FA_visual
+loading:  Subj03_CleanData_test_LM_visual
+loading:  Subj03_CleanData_test_OB_visual
+loading:  Subj04_CleanData_test_FA_visual
+loading:  Subj04_CleanData_test_LM_visual
+loading:  Subj04_CleanData_test_OB_visual
+loading:  Subj05_CleanData_test_FA_visual
+loading:  Subj05_CleanData_test_LM_visual
+loading:  Subj05_CleanData_test_OB_visual
+loading:  Subj06_CleanData_test_FA_visual
+loading:  Subj06_CleanData_test_LM_visual
+loading:  Subj06_CleanData_test_OB_visual
+loading:  Subj07_CleanData_test_FA_visual
+loading:  Subj07_CleanData_test_LM_visual
+loading:  Subj07_CleanData_test_OB_visual
+loading:  Subj08_CleanData_test_FA_visual
+loading:  Subj08_CleanData_test_LM_visual
+loading:  Subj08_CleanData_test_OB_visual
+loading:  Subj09_CleanData_test_FA_visual
+loading:  Subj09_CleanData_test_LM_visual
+loading:  Subj09_CleanData_test_OB_visual
+loading:  Subj11_CleanData_test_FA_visual
+loading:  Subj11_CleanData_test_LM_visual
+loading:  Subj11_CleanData_test_OB_visual
+loading:  Subj12_CleanData_test_FA_visual
+loading:  Subj12_CleanData_test_LM_visual
+loading:  Subj12_CleanData_test_OB_visual
+loading:  Subj13_CleanData_test_FA_visual
+loading:  Subj13_CleanData_test_LM_visual
+loading:  Subj13_CleanData_test_OB_visual
+loading:  Subj14_CleanData_test_FA_visual
+loading:  Subj14_CleanData_test_LM_visual
+loading:  Subj14_CleanData_test_OB_visual
+loading:  Subj15_CleanData_test_FA_visual
+loading:  Subj15_CleanData_test_LM_visual
+loading:  Subj15_CleanData_test_OB_visual
+loading:  Subj16_CleanData_test_FA_visual
+loading:  Subj16_CleanData_test_LM_visual
+loading:  Subj16_CleanData_test_OB_visual
+loading:  Subj17_CleanData_test_FA_visual
+loading:  Subj17_CleanData_test_LM_visual
+loading:  Subj17_CleanData_test_OB_visual
+loading:  Subj18_CleanData_test_FA_visual
+loading:  Subj18_CleanData_test_LM_visual
+loading:  Subj18_CleanData_test_OB_visual
+loading:  Subj19_CleanData_test_FA_visual
+loading:  Subj19_CleanData_test_LM_visual
+loading:  Subj19_CleanData_test_OB_visual
+(90, 768, 31)
+(185, 768, 31) (90, 768, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 768, 31)           0         
+_________________________________________________________________
+reshape_1 (Reshape)          (None, 768, 31, 1)        0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 768, 31, 8)        2056      
+_________________________________________________________________
+batch_normalization_1 (Batch (None, 768, 31, 8)        32        
+_________________________________________________________________
+depthwise_conv2d_1 (Depthwis (None, 768, 1, 8)         256       
+_________________________________________________________________
+batch_normalization_2 (Batch (None, 768, 1, 8)         32        
+_________________________________________________________________
+elu_1 (ELU)                  (None, 768, 1, 8)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 768, 1, 8)         0         
+_________________________________________________________________
+separable_conv2d_1 (Separabl (None, 768, 1, 8)         136       
+_________________________________________________________________
+batch_normalization_3 (Batch (None, 768, 1, 8)         32        
+_________________________________________________________________
+elu_2 (ELU)                  (None, 768, 1, 8)         0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 192, 1, 8)         0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 192, 1, 8)         0         
+_________________________________________________________________
+separable_conv2d_2 (Separabl (None, 192, 1, 16)        208       
+_________________________________________________________________
+batch_normalization_4 (Batch (None, 192, 1, 16)        64        
+_________________________________________________________________
+elu_3 (ELU)                  (None, 192, 1, 16)        0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 48, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 768)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 3)                 2307      
+=================================================================
+Total params: 5,123
+Trainable params: 5,043
+Non-trainable params: 80
+_________________________________________________________________
+subject 1, avg accuracy 0.6818713456392288/0.2866666691170798 over 10 splits
+subject 2, avg accuracy 0.7005847930908203/0.4324324332379007 over 10 splits
+subject 3, avg accuracy 0.7906432807445526/0.3307692307692308 over 10 splits
+subject 4, avg accuracy 0.6979532182216645/0.3614583333333333 over 10 splits
+subject 5, avg accuracy 0.8137426972389221/0.3486238547421377 over 10 splits
+subject 6, avg accuracy 0.7660818755626678/0.30413223243326193 over 10 splits
+subject 7, avg accuracy 0.7175438642501831/0.3080459752473338 over 10 splits
+subject 8, avg accuracy 0.7842105269432068/0.34159292140893177 over 10 splits
+subject 9, avg accuracy 0.7850877106189728/0.32530120611190794 over 10 splits
+subject 11, avg accuracy 0.6877192974090576/0.3520408163265306 over 10 splits
+subject 12, avg accuracy 0.6684210509061813/0.2915789437921424 over 10 splits
+subject 13, avg accuracy 0.8184210598468781/0.31769911594095485 over 10 splits
+subject 14, avg accuracy 0.7010526359081268/0.406756757964959 over 10 splits
+subject 15, avg accuracy 0.7184210538864135/0.3311999998569488 over 10 splits
+subject 16, avg accuracy 0.7031578958034516/0.3919354872357461 over 10 splits
+subject 17, avg accuracy 0.7578947365283966/0.3382352941176472 over 10 splits
+subject 18, avg accuracy 0.7292397618293762/0.2828571433680398 over 10 splits
+subject 19, avg accuracy 0.7073099493980408/0.28901098979698436 over 10 splits
+avg accuracy over all subjects 0.7349642641014523/0.3355743002667262
+subject 1, avg accuracy 0.6467836320400238/0.2800000017219119 over 10 splits
+subject 2, avg accuracy 0.733625727891922/0.47837837781455067 over 10 splits
+subject 3, avg accuracy 0.8500000059604644/0.3523076923076923 over 10 splits
+subject 4, avg accuracy 0.7526315808296203/0.4333333333333333 over 10 splits
+subject 5, avg accuracy 0.8029239773750305/0.34495412945200543 over 10 splits
+subject 6, avg accuracy 0.7280701756477356/0.2909090925716171 over 10 splits
+subject 7, avg accuracy 0.7330409407615661/0.2839080459855754 over 10 splits
+subject 8, avg accuracy 0.8789473712444306/0.3353982313280613 over 10 splits
+subject 9, avg accuracy 0.8330409288406372/0.35783132583980104 over 10 splits
+subject 11, avg accuracy 0.6862573146820068/0.3806122448979592 over 10 splits
+subject 12, avg accuracy 0.731578940153122/0.281052627469364 over 10 splits
+subject 13, avg accuracy 0.7818713486194611/0.330088496696105 over 10 splits
+subject 14, avg accuracy 0.7386842131614685/0.38783783900576674 over 10 splits
+subject 15, avg accuracy 0.768128651380539/0.35119999964237214 over 10 splits
+subject 16, avg accuracy 0.7189473628997802/0.40161290486012735 over 10 splits
+subject 17, avg accuracy 0.7842105329036713/0.3382352941176471 over 10 splits
+subject 18, avg accuracy 0.7725146293640137/0.2942857149669102 over 10 splits
+subject 19, avg accuracy 0.7017543911933899/0.2747252753147712 over 10 splits
+avg accuracy over all subjects 0.7579450958304936/0.34425947929586503
+subject 1, avg accuracy 0.6853801220655441/0.3011111139920023 over 10 splits
+subject 2, avg accuracy 0.7274853825569153/0.42837837902275294 over 10 splits
+subject 3, avg accuracy 0.8500000059604644/0.35923076923076924 over 10 splits
+subject 4, avg accuracy 0.7780701875686645/0.3895833333333333 over 10 splits
+subject 5, avg accuracy 0.7815789461135865/0.3486238543593555 over 10 splits
+subject 6, avg accuracy 0.6947368443012237/0.3487603316868632 over 10 splits
+subject 7, avg accuracy 0.7011695981025696/0.34137931017354983 over 10 splits
+subject 8, avg accuracy 0.8263157963752746/0.3141592929980396 over 10 splits
+subject 9, avg accuracy 0.7733918130397797/0.33253012209771626 over 10 splits
+subject 11, avg accuracy 0.680701756477356/0.39081632653061227 over 10 splits
+subject 12, avg accuracy 0.7263157904148102/0.28631578539547164 over 10 splits
+subject 13, avg accuracy 0.7488304078578949/0.2991150455532876 over 10 splits
+subject 14, avg accuracy 0.7649999976158142/0.4270270279533155 over 10 splits
+subject 15, avg accuracy 0.7897660851478576/0.3375999990463256 over 10 splits
+subject 16, avg accuracy 0.6931578934192657/0.3903225818949361 over 10 splits
+subject 17, avg accuracy 0.7368421018123626/0.31029411764705883 over 10 splits
+subject 18, avg accuracy 0.7400584876537323/0.3057142863103322 over 10 splits
+subject 19, avg accuracy 0.7017543852329254/0.30439560275811417 over 10 splits
+avg accuracy over all subjects 0.7444753112064466/0.3452976266657687
+acc 0.7349642641014523/0.3355743002667262
+
+acc 0.7444753112064466/0.3452976266657687
+
+acc 0.7579450958304936/0.34425947929586503
+
+avg over all trials and subjects 0.7457948903794641/0.3417104687427866
+end time
+Fri Mar 16 15:51:08 CET 2018
