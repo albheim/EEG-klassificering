@@ -3,7 +3,7 @@ import numpy as np
 def kfold(n, k, shuffle=False):
     s = np.arange(n)
     if shuffle:
-        np.shuffle(s)
+        np.random.shuffle(s)
     l = []
     for a in range(k):
         val = s[int(n * a / k):int(n * (a + 1) / k)]

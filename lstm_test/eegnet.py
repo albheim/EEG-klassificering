@@ -23,7 +23,6 @@ print(x[0].shape, xt[0].shape)
 splits = 10
 n_subs = len(x)
 n_models = 3
-n_evaliter = 10
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
@@ -35,12 +34,12 @@ for j in range(n_models):
     N = 3
     samp_freq = 512
 
-    F = 32
+    F = 8
 
     m_in = Input(shape=(T, C))
     m_t = Reshape((T, C, 1))(m_in)
 
-    m_t = Conv2D(F, (samp_freq / 2, 1), padding='same',
+    m_t = Conv2D(F, (samp_freq // 2, 1), padding='same',
                  kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = DepthwiseConv2D((1, C), depth_multiplier=1, padding='valid',
@@ -91,8 +90,8 @@ for j in range(n_models):
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
+                          #validation_data=(x[i][val], y[i][val]),
                           batch_size=64, epochs=500, verbose=0)
-            h = h.history
 
 
             _, a = model.evaluate(x[i][val], y[i][val], verbose=0)

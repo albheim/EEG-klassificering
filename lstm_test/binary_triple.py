@@ -44,35 +44,37 @@ def offset_slice(inputs):
 
 def gen_model():
     m_in = Input(shape=x[0][0].shape)
-    m_off = Lambda(offset_slice)(m_in)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+    m_out = [None for _ in range(3)]
+    for i in range(3):
+        m_off = Lambda(offset_slice)(m_in)
+        m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
 
-    m_t = Conv1D(30, 10, padding='causal')(m_noise)
-    m_t = BatchNormalization()(m_t)
-    m_t = ELU()(m_t)
-    m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+        m_t = Conv1D(30, 10, padding='causal')(m_noise)
+        m_t = BatchNormalization()(m_t)
+        m_t = ELU()(m_t)
+        m_t = AveragePooling1D(2)(m_t)
+        m_t = Dropout(0.2)(m_t)
 
-    m_t = Conv1D(30, 5, padding='causal')(m_t)
-    m_t = BatchNormalization()(m_t)
-    m_t = ELU()(m_t)
-    m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+        m_t = Conv1D(30, 5, padding='causal')(m_t)
+        m_t = BatchNormalization()(m_t)
+        m_t = ELU()(m_t)
+        m_t = AveragePooling1D(2)(m_t)
+        m_t = Dropout(0.2)(m_t)
 
-    m_t = Conv1D(30, 5, padding='causal')(m_t)
-    m_t = BatchNormalization()(m_t)
-    m_t = ELU()(m_t)
-    m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+        m_t = Conv1D(30, 5, padding='causal')(m_t)
+        m_t = BatchNormalization()(m_t)
+        m_t = ELU()(m_t)
+        m_t = AveragePooling1D(2)(m_t)
+        m_t = Dropout(0.2)(m_t)
 
-    m_t = Flatten()(m_t)
-    # m_t = Dense(50)(m_t)
-    # m_t = BatchNormalization()(m_t)
-    # m_t = Activation('tanh')(m_t)
-    m_t = Dense(20)(m_t)
-    m_t = BatchNormalization()(m_t)
-    m_t = Activation('tanh')(m_t)
-    m_out = Dense(1, activation='sigmoid')(m_t)
+        m_t = Flatten()(m_t)
+        # m_t = Dense(50)(m_t)
+        # m_t = BatchNormalization()(m_t)
+        # m_t = Activation('tanh')(m_t)
+        m_t = Dense(20)(m_t)
+        m_t = BatchNormalization()(m_t)
+        m_t = Activation('tanh')(m_t)
+        m_out[i] = Dense(1, activation='sigmoid')(m_t)
 
     model = Model(inputs=m_in, outputs=m_out)
 
@@ -86,12 +88,12 @@ for j in range(n_models):
 
     msets[j] = " " #mset
 
-    models = [gen_model() for _ in range(3)]
+    model = gen_model()
 
     if j == 0:
-        models[0].summary()
+        model.summary()
 
-    w_save = [model.get_weights() for model in models]
+    w_save = model.get_weights()
     avgacc = 0
     avgacc2 = 0
     for i in range(n_subs):
@@ -100,25 +102,20 @@ for j in range(n_models):
         acc2 = 0
         for tr, val in util.kfold(n, splits):
             # reset to initial weights
-            vote = []
-            vote2 = []
-            p1 = np.zeros(y[i][val].shape)
-            p2 = np.zeros(yt[i].shape)
-            for k in range(3):
-                models[k].set_weights(w_save[k])
+            model.set_weights(w_save)
 
-                # fit with next kfold data
-                h = models[k].fit(x[i][tr], y[i][tr, k],
-                                  batch_size=64, epochs=200, verbose=0)
-                h = h.history
+            # fit with next kfold data
+            h = model.fit(x[i][tr], [y[i][tr, 0], y[i][tr, 1], y[i][tr, 2]],
+                          batch_size=64, epochs=200, verbose=0)
+            h = h.history
 
-                p1[:, k] += models[k].predict(x[i][val]).reshape((val.shape[0], ))
-                p2[:, k] += models[k].predict(xt[i]).reshape((xt[i].shape[0], ))
+            _, a = model.evaluate(x[i][val], [y[i][tr, 0], y[i][tr, 1], y[i][tr, 2]],
+                                  verbose=0)
+            _, a2 = model.evaluate(xt[i], [yt[i][:, 0], yt[i][:, 1], yt[i][:, 2]],
+                                   verbose=0)
 
-            acc += np.mean(np.equal(np.argmax(p1, axis=-1),
-                                    np.argmax(y[i][val], axis=-1)))
-            acc2 += np.mean(np.equal(np.argmax(p2, axis=-1),
-                                     np.argmax(yt[i], axis=-1)))
+            acc += a
+            acc2 += a2
 
         acc /= splits
         acc2 /= splits

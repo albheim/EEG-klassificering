@@ -22,11 +22,11 @@ def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transp
                                                   "Visual" if visual else "Verbal",
                                                   name))
         trials = m[name][0][0][2][0]
-        if cut:
-            for j in range(trials.shape[0]):
+        for j in range(trials.shape[0]):
+            if cut:
                 trials[j] = trials[j][:, 768:1536]
-                if transpose:
-                    trials[j] = trials[j].T
+            if transpose:
+                trials[j] = trials[j].T
         labels = np.zeros((trials.shape[0], 3))
         labels[:, i] = 1
         if xn is None:
@@ -50,20 +50,17 @@ def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False,
     x = []
     y = []
 
-    if visual:
-        subs = [i if i < 10 else i + 1 for i in range(1, 19)]
-    else:
-        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
-
     if idx is None:
-        for sub in subs:
-            xn, yn = load_single_sub(sub, cut, study, shuffle, visual, transpose)
-            x.append(xn)
-            y.append(yn)
-    else:
-        x, y = load_single_sub(idx, cut, study, shuffle, visual, transpose)
+        if visual:
+            idx = [i if i < 10 else i + 1 for i in range(1, 19)]
+        else:
+            idx = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
 
-    print(x[0].shape)
+    for sub in idx:
+        xn, yn = load_single_sub(sub, cut, study, shuffle, visual, transpose)
+        x.append(xn)
+        y.append(yn)
+
     return (x, y)
 
 

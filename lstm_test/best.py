@@ -25,14 +25,13 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True, visual=True, transpose=True)
-xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
-print(x[0].shape)
+xt, yt = data.load_single(cut=True, visual=True, transpose=True)
+x, y = data.load_single(cut=True, visual=True, study=False, transpose=True)
+print(x[0].shape, xt[0].shape)
 
 splits = 10
 n_subs = len(x)
 n_models = 20
-n_evaliter = 10
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
@@ -85,9 +84,9 @@ for j in range(n_models):
     m_t = Dropout(0.2)(m_t)
 
     m_t = Flatten()(m_t)
-    m_t = Dense(50)(m_t)
-    m_t = BatchNormalization()(m_t)
-    m_t = Activation('tanh')(m_t)
+    # m_t = Dense(50)(m_t)
+    # m_t = BatchNormalization()(m_t)
+    # m_t = Activation('tanh')(m_t)
     m_t = Dense(20)(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = Activation('tanh')(m_t)
@@ -114,6 +113,7 @@ for j in range(n_models):
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
+                          # validation_data=(x[i][val], y[i][val]),
                           batch_size=64, epochs=200, verbose=0)
             h = h.history
 
