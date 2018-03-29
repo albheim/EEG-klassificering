@@ -22,10 +22,15 @@ print(x[0].shape, xt[0].shape)
 
 splits = 10
 n_subs = len(x)
-n_models = 3
+n_models = 5
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
+
+# channels = [4, 23]
+# for i in range(n_subs):
+#     x[i] = x[i][:, :, channels]
+#     xt[i] = xt[i][:, :, channels]
 
 
 for j in range(n_models):
@@ -92,7 +97,6 @@ for j in range(n_models):
             h = model.fit(x[i][tr], y[i][tr],
                           #validation_data=(x[i][val], y[i][val]),
                           batch_size=64, epochs=500, verbose=0)
-
 
             _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
             _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
