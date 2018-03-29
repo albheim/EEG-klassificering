@@ -9,7 +9,7 @@ import tensorflow as tf
 from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
 from keras.layers import TimeDistributed, Lambda, AlphaDropout
-from keras.layers import SimpleRNN, RNN, LSTM, GRU, Concatenate
+from keras.layers import SimpleRNN, RNN, LSTM, GRU, concatenate
 from keras.layers import Conv1D, MaxPooling1D, Flatten
 from keras.layers import ELU, PReLU, Activation, AveragePooling1D
 
@@ -35,7 +35,6 @@ print(x[0].shape)
 splits = 10
 n_subs = len(x)
 n_models = 20
-n_evaliter = 10
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
@@ -47,7 +46,6 @@ def offset_slice(inputs):
 
 def gen_model():
     m_in = Input(shape=x[0][0].shape)
-
     m_off = Lambda(offset_slice)(m_in)
     m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
 
@@ -79,9 +77,6 @@ def gen_model():
     m_out1 = Dense(1)(m_t)
 
 
-    m_off = Lambda(offset_slice)(m_in)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
-
     m_t = Conv1D(22, 20, padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
@@ -110,9 +105,6 @@ def gen_model():
     m_out2 = Dense(1)(m_t)
 
 
-    m_off = Lambda(offset_slice)(m_in)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
-
     m_t = Conv1D(22, 20, padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
@@ -140,9 +132,8 @@ def gen_model():
     m_t = Activation('tanh')(m_t)
     m_out3 = Dense(1)(m_t)
 
-    m_conc = Concatenate([m_out1, m_out2, m_out3])
+    m_conc = concatenate([m_out1, m_out2, m_out3])
     m_out = Activation('softmax')(m_conc)
->>>>>>> 5c52d38780cca61f932a7b5b92e45d4267a4f2dc
 
     model = Model(inputs=m_in, outputs=m_out)
 
@@ -174,7 +165,7 @@ for j in range(n_models):
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
-                              batch_size=64, epochs=200, verbose=0)
+                          batch_size=64, epochs=200, verbose=0)
 
             _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
             # _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
