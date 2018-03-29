@@ -9,7 +9,7 @@ import tensorflow as tf
 from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
 from keras.layers import TimeDistributed, Lambda, AlphaDropout
-from keras.layers import SimpleRNN, RNN, LSTM, GRU
+from keras.layers import SimpleRNN, RNN, LSTM, GRU, Concatenate
 from keras.layers import Conv1D, MaxPooling1D, Flatten
 from keras.layers import ELU, PReLU, Activation, AveragePooling1D
 
@@ -26,7 +26,10 @@ import util
 
 
 x, y = data.load_single(cut=True, visual=True, transpose=True)
-xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
+x2, y2 = data.load_single(cut=True, visual=False, transpose=True)
+x += x2
+y += y2
+# xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
 print(x[0].shape)
 
 splits = 10
@@ -47,32 +50,97 @@ def gen_model():
     m_off = Lambda(offset_slice)(m_in)
     m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
 
-    m_t = Conv1D(30, 10, padding='causal')(m_noise)
+    m_t = Conv1D(22, 20, padding='causal')(m_noise)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+    m_t = Dropout(0.3)(m_t)
 
-    m_t = Conv1D(30, 5, padding='causal')(m_t)
+    m_t = Conv1D(15, 20, padding='causal')(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+    m_t = Dropout(0.5)(m_t)
 
-    m_t = Conv1D(30, 5, padding='causal')(m_t)
+    m_t = Conv1D(10, 12, padding='causal')(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
-    m_t = Dropout(0.2)(m_t)
+    m_t = Dropout(0.6)(m_t)
 
     m_t = Flatten()(m_t)
-    # m_t = Dense(50)(m_t)
-    # m_t = BatchNormalization()(m_t)
-    # m_t = Activation('tanh')(m_t)
-    m_t = Dense(20)(m_t)
+    m_t = Dense(35)(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = Activation('tanh')(m_t)
-    m_out = Dense(1, activation='sigmoid')(m_t)
+    m_t = Dense(15)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_out1 = Dense(1)(m_t)
+
+
+    m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+
+    m_t = Conv1D(22, 20, padding='causal')(m_noise)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.3)(m_t)
+
+    m_t = Conv1D(15, 20, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.5)(m_t)
+
+    m_t = Conv1D(10, 12, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.6)(m_t)
+
+    m_t = Flatten()(m_t)
+    m_t = Dense(35)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_t = Dense(15)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_out2 = Dense(1)(m_t)
+
+
+    m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+
+    m_t = Conv1D(22, 20, padding='causal')(m_noise)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.3)(m_t)
+
+    m_t = Conv1D(15, 20, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.5)(m_t)
+
+    m_t = Conv1D(10, 12, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.6)(m_t)
+
+    m_t = Flatten()(m_t)
+    m_t = Dense(35)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_t = Dense(15)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_out3 = Dense(1)(m_t)
+
+    m_conc = Concatenate([m_out1, m_out2, m_out3])
+    m_out = Activation('softmax')(m_conc)
 
     model = Model(inputs=m_in, outputs=m_out)
 
@@ -86,12 +154,12 @@ for j in range(n_models):
 
     msets[j] = " " #mset
 
-    models = [gen_model() for _ in range(3)]
+    model = gen_model()
 
     if j == 0:
-        models[0].summary()
+        model.summary()
 
-    w_save = [model.get_weights() for model in models]
+    w_save = model.get_weights()
     avgacc = 0
     avgacc2 = 0
     for i in range(n_subs):
@@ -101,24 +169,23 @@ for j in range(n_models):
         for tr, val in util.kfold(n, splits):
             # reset to initial weights
             vote = []
-            vote2 = []
-            p1 = np.zeros(y[i][val].shape)
-            p2 = np.zeros(yt[i].shape)
-            for k in range(3):
-                models[k].set_weights(w_save[k])
+            # vote2 = []
+            # p2 = np.zeros(yt[i].shape)
+            model.set_weights(w_save)
 
                 # fit with next kfold data
-                h = models[k].fit(x[i][tr], y[i][tr, k],
-                                  batch_size=64, epochs=200, verbose=0)
-                h = h.history
+            h = model.fit(x[i][tr], y[i][tr, k],
+                              batch_size=64, epochs=200, verbose=0)
 
-                p1[:, k] += models[k].predict(x[i][val]).reshape((val.shape[0], ))
-                p2[:, k] += models[k].predict(xt[i]).reshape((xt[i].shape[0], ))
+            _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
+            acc += a
+            # p1[:, k] += models[k].predict(x[i][val]).reshape((val.shape[0], ))
+            # p2[:, k] += models[k].predict(xt[i]).reshape((xt[i].shape[0], ))
 
-            acc += np.mean(np.equal(np.argmax(p1, axis=-1),
-                                    np.argmax(y[i][val], axis=-1)))
-            acc2 += np.mean(np.equal(np.argmax(p2, axis=-1),
-                                     np.argmax(yt[i], axis=-1)))
+            # acc += np.mean(np.equal(np.argmax(p1, axis=-1),
+                                    # np.argmax(y[i][val], axis=-1)))
+            # acc2 += np.mean(np.equal(np.argmax(p2, axis=-1),
+                                     # np.argmax(yt[i], axis=-1)))
 
         acc /= splits
         acc2 /= splits

@@ -36,6 +36,10 @@ msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
 
+channels = [4, 23]
+for i in range(n_subs):
+    x[i] = x[i][:, :, channels]
+    xt[i] = xt[i][:, :, channels]
 
 def gen_model():
     return {"l1_nodes": np.random.randint(10, 40),
@@ -137,7 +141,13 @@ for j in range(n_models):
     print("avg accuracy over all subjects {}/{}".format(avgacc, avgacc2))
 
 
-for a, a2 in sorted(zip(accs, accs2)):
-    print("acc {}/{}\n".format(a, a2))
+smset = {}
+sacc = sum([a**2 for a in accs])
+for a, a2, mset in sorted(zip(accs, accs2, msets)):
+    print("acc {}/{}\n{}\n".format(a, a2, mset))
+    # for key, value in mset:
+        # smset[key] += (value * a**2 / sacc)
+
+# print("accuracy squared weighted sum over all setups,\n{}\n".format(smset))
 
 print("avg over all trials and subjects {}/{}".format(sum(accs) / len(accs), sum(accs2) / len(accs2)))

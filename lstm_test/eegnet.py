@@ -22,11 +22,16 @@ print(x[0].shape, xt[0].shape)
 
 splits = 10
 n_subs = len(x)
-n_models = 3
+n_models = 20
 n_evaliter = 10
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
+
+# channels = [4, 23]
+# for i in range(n_subs):
+#     x[i] = x[i][:, :, channels]
+#     xt[i] = xt[i][:, :, channels]
 
 
 for j in range(n_models):
@@ -35,12 +40,12 @@ for j in range(n_models):
     N = 3
     samp_freq = 512
 
-    F = 32
+    F = 8
 
     m_in = Input(shape=(T, C))
     m_t = Reshape((T, C, 1))(m_in)
 
-    m_t = Conv2D(F, (samp_freq / 2, 1), padding='same',
+    m_t = Conv2D(F, (samp_freq // 2, 1), padding='same',
                  kernel_regularizer=regularizers.l1_l2(0.0001, 0.0001))(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = DepthwiseConv2D((1, C), depth_multiplier=1, padding='valid',
@@ -91,7 +96,7 @@ for j in range(n_models):
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
-                          batch_size=64, epochs=500, verbose=0)
+                          batch_size=64, epochs=200, verbose=0) # originally 500
             h = h.history
 
 
