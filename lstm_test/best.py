@@ -25,8 +25,8 @@ import data
 import util
 
 
-xt, yt = data.load_single(cut=True, visual=True, transpose=True)
-x, y = data.load_single(cut=True, visual=True, study=False, transpose=True)
+x, y = data.load_single(cut=True, visual=True, transpose=True)
+xt, yt = data.load_single(cut=True, visual=False, study=True, transpose=True)
 print(x[0].shape, xt[0].shape)
 
 splits = 10
