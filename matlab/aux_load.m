@@ -11,6 +11,7 @@ function [ X,Y,n ] = aux_load( type, num )
 addpath(genpath('~/Documents/EEG-data'))
 addpath(genpath('C:\Users\damir\Documents\EEG-data'))
 addpath(genpath('C:\Users\Albin Heimerson\Desktop\exjobb\DATA'))
+addpath(genpath('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA'))
 
 if (~ischar(type))
     error('The input argument type must be a character array!');
