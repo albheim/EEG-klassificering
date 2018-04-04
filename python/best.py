@@ -16,8 +16,6 @@ from keras.layers import ELU, PReLU, Activation, AveragePooling1D
 from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
 
-from layers import GaussianNoiseAlways
-
 from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
 
