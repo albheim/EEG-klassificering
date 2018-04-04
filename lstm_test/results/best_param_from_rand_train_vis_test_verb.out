@@ -1,0 +1,1197 @@
+data dir
+/lunarc/nobackup/users/albheim/EEG-klassificering/DATA
+script
+#!/bin/sh
+#SBATCH -t 60:00:00
+#SBATCH -J b_par_Q
+#SBATCH -A lu2018-2-3
+#// SBATCH -o stdout_%j.out
+#// SBATCH -e stderr_%j.err
+
+# shold be lu or gpu
+#SBATCH -p gpu
+
+# how many gpus, 4 per node, using many seems to crash more often so stick with 1
+#SBATCH --gres=gpu:1
+
+# use 5 cores per GPU
+#SBATCH -n 5
+#SBATCH --mem-per-cpu=3100
+
+DATA_DIR="$(cat ../data_location.txt)"
+echo "data dir"
+echo $DATA_DIR
+
+echo "script"
+cat $0
+
+PY_FILE="best.py"
+echo "py file"
+cat $PY_FILE
+
+echo "nvidia smi"
+nvidia-smi
+
+echo "start time"
+date
+
+cp -r $DATA_DIR $SNIC_TMP
+ls $SNIC_TMP
+du -h "${SNIC_TMP}/DATA"
+
+echo "copy done time"
+date
+
+python $PY_FILE $SNIC_TMP
+
+echo "end time"
+date
+py file
+import sys
+from datetime import datetime
+
+import numpy as np
+from scipy import io
+
+import tensorflow as tf
+
+from keras.models import Sequential, Model
+from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
+from keras.layers import TimeDistributed, Lambda, AlphaDropout
+from keras.layers import SimpleRNN, RNN, LSTM, GRU
+from keras.layers import Conv1D, MaxPooling1D, Flatten
+from keras.layers import ELU, PReLU, Activation, AveragePooling1D
+
+from keras.optimizers import SGD, Adam, RMSprop, Nadam
+from keras import backend as K
+
+from layers import GaussianNoiseAlways
+
+from tensorflow.python.client import device_lib
+print(device_lib.list_local_devices())
+
+import data
+import util
+
+
+x, y = data.load_single(cut=True, visual=True, transpose=True)
+# xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
+xt, yt = data.load_single(cut=True, visual=False, study=True, transpose=True)
+print(x[0].shape, xt[0].shape)
+
+splits = 10
+n_subs = len(x)
+n_models = 20
+msets = [None for j in range(n_models)]
+accs = [0 for j in range(n_models)]
+accs2 = [0 for j in range(n_models)]
+
+# channels = [4, 23]
+# for i in range(n_subs):
+#     x[i] = x[i][:, :, channels]
+#     xt[i] = xt[i][:, :, channels]
+
+
+def offset_slice(inputs):
+    w = 630
+    r = np.random.randint(inputs.shape[1] - w + 1)
+    return inputs[:, r:r + w, :]
+
+for j in range(n_models):
+
+    msets[j] = " " # mset
+
+    m_in = Input(shape=x[0][0].shape)
+    m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+
+    m_t = Conv1D(22, 20, padding='causal')(m_noise)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.3)(m_t)
+
+    m_t = Conv1D(15, 20, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.5)(m_t)
+
+    m_t = Conv1D(10, 12, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.6)(m_t)
+
+    m_t = Flatten()(m_t)
+    m_t = Dense(35)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_t = Dense(15)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_out = Dense(3, activation='softmax')(m_t)
+
+    model = Model(inputs=m_in, outputs=m_out)
+
+    m_save = model.get_config()
+    if j == 0:
+        model.summary()
+
+    avgacc = 0
+    avgacc2 = 0
+    for i in range(n_subs):
+        n = x[i].shape[0]
+        acc = 0
+        acc2 = 0
+        for tr, val in util.kfold(n, splits, shuffle=True):
+            # recreate model
+            model = Model.from_config(m_save)
+            model.compile(loss='categorical_crossentropy',
+                          optimizer='adam',
+                          metrics=['accuracy'])
+
+            # fit with next kfold data
+            h = model.fit(x[i][tr], y[i][tr],
+                          # validation_data=(x[i][val], y[i][val]),
+                          batch_size=64, epochs=200, verbose=0)
+            h = h.history
+
+            _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
+            _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
+            acc += a
+            acc2 += a2
+
+        K.clear_session()
+
+        acc /= splits
+        acc2 /= splits
+        avgacc += acc
+        avgacc2 += acc2
+
+        print("subject {}, avg accuracy {}/{} over {} splits".format(i + 1 if i + 1 < 10 else i + 2,
+                                                                     acc, acc2, splits))
+
+    avgacc /= n_subs
+    accs[j] = avgacc
+    avgacc2 /= n_subs
+    accs2[j] = avgacc2
+    print("avg accuracy over all subjects {}/{}".format(avgacc, avgacc2))
+
+
+for a, a2 in sorted(zip(accs, accs2)):
+    print("acc {}/{}\n".format(a, a2))
+
+print("avg over all trials and subjects {}/{}".format(sum(accs) / len(accs), sum(accs2) / len(accs2)))
+nvidia smi
+Tue Apr  3 11:14:18 2018       
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 384.81                 Driver Version: 384.81                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla K80           On   | 00000000:04:00.0 Off |                    0 |
+| N/A   46C    P0   111W / 149W |  10974MiB / 11439MiB |     59%      Default |
++-------------------------------+----------------------+----------------------+
+|   1  Tesla K80           On   | 00000000:05:00.0 Off |                    0 |
+| N/A   79C    P0   146W / 149W |  10974MiB / 11439MiB |     70%      Default |
++-------------------------------+----------------------+----------------------+
+|   2  Tesla K80           On   | 00000000:84:00.0 Off |                    0 |
+| N/A   47C    P0    66W / 149W |  10974MiB / 11439MiB |      7%      Default |
++-------------------------------+----------------------+----------------------+
+|   3  Tesla K80           On   | 00000000:85:00.0 Off |                    0 |
+| N/A   37C    P8    31W / 149W |      1MiB / 11439MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|    0     15414      C   python                                     10961MiB |
+|    1     15694      C   python                                     10961MiB |
+|    2     15848      C   python                                     10961MiB |
++-----------------------------------------------------------------------------+
+start time
+Tue Apr  3 11:14:18 CEST 2018
+DATA
+2.4G	/local/slurmtmp.562315/DATA/Visual
+2.4G	/local/slurmtmp.562315/DATA/Verbal
+388M	/local/slurmtmp.562315/DATA/Modified/marginal
+388M	/local/slurmtmp.562315/DATA/Modified
+5.1G	/local/slurmtmp.562315/DATA
+copy done time
+Tue Apr  3 11:14:22 CEST 2018
+2018-04-03 11:14:23.394845: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-04-03 11:14:23.654735: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-04-03 11:14:23.654858: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:14:50.535075: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:17:31.209397: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:20:10.876858: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:22:53.007186: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:25:35.143375: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:28:18.657088: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:30:58.647401: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:33:41.928933: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:36:25.988191: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:39:08.342496: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:41:50.438531: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:44:32.320126: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:47:15.658389: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:50:00.548497: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:52:42.752479: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:55:25.392770: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 11:58:09.418167: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:00:52.772337: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:03:32.075948: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:06:16.646366: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:08:57.805300: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:11:41.481120: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:14:22.810315: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:17:06.643971: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:19:50.781901: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:22:32.506948: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:25:17.143027: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:28:00.728033: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:30:43.228098: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:33:28.829250: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:36:13.294274: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:38:59.260818: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:41:38.991646: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:44:24.452255: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:47:10.145740: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:49:50.884001: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:52:32.243415: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:55:17.870329: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 12:57:59.033193: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:00:42.288309: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:03:24.722946: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:06:07.753238: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:08:50.488008: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:11:31.368471: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:14:13.354335: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:16:55.553471: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:19:33.637507: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:22:16.237328: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:24:58.393783: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:27:41.303608: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:30:21.359825: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:33:02.408060: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:35:44.358644: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:38:25.295348: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:41:04.897174: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:43:48.124671: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:46:28.100232: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:49:09.866849: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:51:49.010457: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:54:30.324068: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:57:11.199786: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 13:59:53.658666: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:02:35.764863: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:05:16.906497: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:07:57.480134: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:10:38.832067: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:13:21.426024: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:16:02.957395: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:18:41.909319: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:21:25.388003: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:24:08.380566: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:26:49.707126: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:29:29.797258: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:32:12.086565: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:34:52.084459: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:37:31.640470: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:40:12.215379: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:42:54.564818: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:45:33.047596: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:48:14.522060: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:50:56.968245: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:53:38.334837: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:56:18.546410: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 14:59:01.053099: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:01:43.660821: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:04:24.797094: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:07:03.975118: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:09:48.054773: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:12:28.541138: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:15:08.850913: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:17:48.400335: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:20:31.413913: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:23:10.910081: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:25:51.434259: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:28:33.019580: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:31:12.709811: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:33:52.891393: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:36:34.982495: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:39:17.999197: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:41:59.304243: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:44:39.840224: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:47:20.717408: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:50:02.277336: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:52:46.546998: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:55:23.764990: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 15:58:07.040281: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:00:49.415928: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:03:30.915560: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:06:11.446358: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:08:55.242476: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:11:34.890236: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:14:16.721208: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:16:56.413055: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:19:38.212774: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:22:18.796041: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:25:01.689312: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:27:42.817402: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:30:23.777425: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:33:03.612224: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:35:46.675521: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:38:29.046866: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:41:12.592295: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:43:53.005454: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:46:35.119830: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:49:18.012935: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:52:00.186920: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:54:38.829461: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 16:57:22.149760: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:00:01.673669: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:02:43.686248: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:05:23.125181: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:08:04.873301: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:10:46.365539: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:13:26.363741: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:16:08.840307: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:18:50.123710: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:21:30.170855: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:24:13.259745: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:26:55.378004: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:29:39.274497: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:32:16.999702: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:35:00.238001: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:37:43.705389: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:40:22.825930: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:43:02.303641: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:45:45.901447: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:48:25.306511: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:51:06.244681: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:53:46.811087: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:56:27.992423: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 17:59:09.014043: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:01:49.145241: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:04:31.667780: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:07:13.743742: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:09:51.907113: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:12:34.412169: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:15:16.682907: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:17:59.600939: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:20:39.890706: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:23:20.966031: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:26:03.668963: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:28:44.658729: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:31:24.642037: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:34:07.835676: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:36:47.941385: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:39:29.528731: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:42:08.989415: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:44:50.425202: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:47:31.367259: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:50:14.213153: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:52:56.670266: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:55:38.174705: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 18:58:18.628658: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:00:59.980835: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:03:42.442036: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:06:23.681297: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:09:03.082333: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:11:46.586860: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:14:29.766989: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:17:11.258445: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:19:50.916383: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:22:33.536255: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:25:13.627011: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:27:53.035896: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:30:33.659253: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:33:16.159519: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:35:54.628158: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:38:35.935674: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:41:18.240353: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:43:59.770206: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:46:40.021296: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:49:22.761192: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:52:05.057608: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:54:46.280365: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 19:57:25.342926: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:00:09.380694: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:02:49.932466: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:05:30.905838: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:08:10.412514: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:10:53.872426: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:13:32.988267: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:16:13.580927: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:18:55.041876: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:21:34.578786: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:24:14.869035: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:26:56.784849: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:29:40.104772: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:32:21.400571: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:35:02.208890: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:37:43.140551: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:40:24.737055: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:43:08.303313: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:45:46.127077: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:48:29.305929: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:51:12.031689: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:53:52.772661: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:56:33.225686: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 20:59:17.008317: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:01:56.414086: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:04:38.242991: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:07:17.714943: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:09:59.514806: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:12:40.372130: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:15:23.043589: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:18:04.088797: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:20:45.251868: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:23:25.288789: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:26:08.186480: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:28:50.321057: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:31:33.601793: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:34:13.896754: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:36:56.148392: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:39:38.798101: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:42:20.518746: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:44:59.248811: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:47:42.479977: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:50:22.043737: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:53:03.823280: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:55:43.351336: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 21:58:25.120995: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:01:06.939160: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:03:47.128747: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:06:29.669177: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:09:11.110681: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:11:51.447192: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:14:34.694601: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:17:16.889178: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:20:00.983651: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:22:39.201826: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:25:22.485183: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:28:05.822893: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:30:45.082752: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:33:25.098255: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:36:08.449321: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:38:47.942640: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:41:28.569785: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:44:09.149495: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:46:50.417943: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:49:31.575353: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:52:11.703853: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:54:54.164537: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 22:57:36.207683: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:00:14.360267: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:02:57.123173: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:05:39.611729: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:08:22.759868: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:11:03.066203: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:13:44.650840: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:16:27.054808: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:19:08.216687: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:21:48.452867: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:24:31.932586: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:27:11.980516: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:29:53.889101: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:32:33.362386: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:35:14.789696: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:37:55.596018: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:40:37.908978: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:43:20.465325: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:46:01.512989: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:48:42.097528: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:51:23.574854: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:54:06.194078: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:56:47.439431: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-03 23:59:26.677998: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:02:09.871476: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:04:52.344765: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:07:33.769687: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:10:13.894089: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:12:56.318258: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:15:36.487700: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:18:16.043748: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:20:56.839432: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:23:39.081592: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:26:17.709671: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:28:59.023284: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:31:41.410998: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:34:22.696344: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:37:02.902575: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:39:45.453669: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:42:28.075244: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:45:09.651164: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:47:48.764063: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:50:32.937393: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:53:13.527307: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:55:54.465368: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 00:58:34.341116: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:01:17.345022: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:03:56.706266: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:06:37.256899: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:09:18.776556: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:11:58.679264: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:14:38.894468: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:17:20.727698: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:20:03.914080: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:22:45.243723: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:25:25.739590: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:28:06.761097: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:30:48.293945: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:33:31.896642: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:36:09.778949: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:38:52.616400: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:41:35.088872: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:44:16.374448: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:46:56.901281: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:49:40.736063: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:52:20.474004: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:55:02.262330: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 01:57:41.739855: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:00:23.819672: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:03:04.539834: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:05:47.256828: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:08:28.142865: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:11:09.467958: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:13:49.151516: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:16:31.884801: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:19:13.728057: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:21:57.234176: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:24:38.145129: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:27:20.561504: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:30:03.466816: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:32:45.537467: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:35:24.151412: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:38:07.063842: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:40:46.733586: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:43:28.020815: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:46:07.300894: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:48:48.690747: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:51:30.113926: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:54:10.158062: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:56:52.974625: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 02:59:34.256487: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 03:02:14.158113: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 03:04:57.402208: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 03:07:39.412459: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 03:10:23.047855: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 03:13:01.102441: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 03:15:44.536319: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 03:18:28.535283: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-04 03:21:08.306360: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 18126247922037910652
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11324823962
+locality {
+  bus_id: 2
+}
+incarnation: 13017007497321303205
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+loading:  Subj01_CleanData_study_FA
+loading:  Subj01_CleanData_study_LM
+loading:  Subj01_CleanData_study_OB
+loading:  Subj02_CleanData_study_FA
+loading:  Subj02_CleanData_study_LM
+loading:  Subj02_CleanData_study_OB
+loading:  Subj03_CleanData_study_FA
+loading:  Subj03_CleanData_study_LM
+loading:  Subj03_CleanData_study_OB
+loading:  Subj04_CleanData_study_FA
+loading:  Subj04_CleanData_study_LM
+loading:  Subj04_CleanData_study_OB
+loading:  Subj05_CleanData_study_FA
+loading:  Subj05_CleanData_study_LM
+loading:  Subj05_CleanData_study_OB
+loading:  Subj06_CleanData_study_FA
+loading:  Subj06_CleanData_study_LM
+loading:  Subj06_CleanData_study_OB
+loading:  Subj07_CleanData_study_FA
+loading:  Subj07_CleanData_study_LM
+loading:  Subj07_CleanData_study_OB
+loading:  Subj08_CleanData_study_FA
+loading:  Subj08_CleanData_study_LM
+loading:  Subj08_CleanData_study_OB
+loading:  Subj09_CleanData_study_FA
+loading:  Subj09_CleanData_study_LM
+loading:  Subj09_CleanData_study_OB
+loading:  Subj11_CleanData_study_FA
+loading:  Subj11_CleanData_study_LM
+loading:  Subj11_CleanData_study_OB
+loading:  Subj12_CleanData_study_FA
+loading:  Subj12_CleanData_study_LM
+loading:  Subj12_CleanData_study_OB
+loading:  Subj13_CleanData_study_FA
+loading:  Subj13_CleanData_study_LM
+loading:  Subj13_CleanData_study_OB
+loading:  Subj14_CleanData_study_FA
+loading:  Subj14_CleanData_study_LM
+loading:  Subj14_CleanData_study_OB
+loading:  Subj15_CleanData_study_FA
+loading:  Subj15_CleanData_study_LM
+loading:  Subj15_CleanData_study_OB
+loading:  Subj16_CleanData_study_FA
+loading:  Subj16_CleanData_study_LM
+loading:  Subj16_CleanData_study_OB
+loading:  Subj17_CleanData_study_FA
+loading:  Subj17_CleanData_study_LM
+loading:  Subj17_CleanData_study_OB
+loading:  Subj18_CleanData_study_FA
+loading:  Subj18_CleanData_study_LM
+loading:  Subj18_CleanData_study_OB
+loading:  Subj19_CleanData_study_FA
+loading:  Subj19_CleanData_study_LM
+loading:  Subj19_CleanData_study_OB
+loading:  Subj01_CleanData_study_FA
+loading:  Subj01_CleanData_study_LM
+loading:  Subj01_CleanData_study_OB
+loading:  Subj02_CleanData_study_FA
+loading:  Subj02_CleanData_study_LM
+loading:  Subj02_CleanData_study_OB
+loading:  Subj06_CleanData_study_FA
+loading:  Subj06_CleanData_study_LM
+loading:  Subj06_CleanData_study_OB
+loading:  Subj07_CleanData_study_FA
+loading:  Subj07_CleanData_study_LM
+loading:  Subj07_CleanData_study_OB
+loading:  Subj08_CleanData_study_FA
+loading:  Subj08_CleanData_study_LM
+loading:  Subj08_CleanData_study_OB
+loading:  Subj09_CleanData_study_FA
+loading:  Subj09_CleanData_study_LM
+loading:  Subj09_CleanData_study_OB
+loading:  Subj10_CleanData_study_FA
+loading:  Subj10_CleanData_study_LM
+loading:  Subj10_CleanData_study_OB
+loading:  Subj11_CleanData_study_FA
+loading:  Subj11_CleanData_study_LM
+loading:  Subj11_CleanData_study_OB
+loading:  Subj12_CleanData_study_FA
+loading:  Subj12_CleanData_study_LM
+loading:  Subj12_CleanData_study_OB
+loading:  Subj14_CleanData_study_FA
+loading:  Subj14_CleanData_study_LM
+loading:  Subj14_CleanData_study_OB
+loading:  Subj15_CleanData_study_FA
+loading:  Subj15_CleanData_study_LM
+loading:  Subj15_CleanData_study_OB
+loading:  Subj16_CleanData_study_FA
+loading:  Subj16_CleanData_study_LM
+loading:  Subj16_CleanData_study_OB
+loading:  Subj17_CleanData_study_FA
+loading:  Subj17_CleanData_study_LM
+loading:  Subj17_CleanData_study_OB
+loading:  Subj18_CleanData_study_FA
+loading:  Subj18_CleanData_study_LM
+loading:  Subj18_CleanData_study_OB
+loading:  Subj19_CleanData_study_FA
+loading:  Subj19_CleanData_study_LM
+loading:  Subj19_CleanData_study_OB
+loading:  Subj20_CleanData_study_FA
+loading:  Subj20_CleanData_study_LM
+loading:  Subj20_CleanData_study_OB
+loading:  Subj21_CleanData_study_FA
+loading:  Subj21_CleanData_study_LM
+loading:  Subj21_CleanData_study_OB
+loading:  Subj22_CleanData_study_FA
+loading:  Subj22_CleanData_study_LM
+loading:  Subj22_CleanData_study_OB
+(185, 768, 31) (175, 768, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 768, 31)           0         
+_________________________________________________________________
+lambda_1 (Lambda)            (None, 630, 31)           0         
+_________________________________________________________________
+gaussian_noise_1 (GaussianNo (None, 630, 31)           0         
+_________________________________________________________________
+conv1d_1 (Conv1D)            (None, 630, 22)           13662     
+_________________________________________________________________
+batch_normalization_1 (Batch (None, 630, 22)           88        
+_________________________________________________________________
+elu_1 (ELU)                  (None, 630, 22)           0         
+_________________________________________________________________
+average_pooling1d_1 (Average (None, 315, 22)           0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 315, 22)           0         
+_________________________________________________________________
+conv1d_2 (Conv1D)            (None, 315, 15)           6615      
+_________________________________________________________________
+batch_normalization_2 (Batch (None, 315, 15)           60        
+_________________________________________________________________
+elu_2 (ELU)                  (None, 315, 15)           0         
+_________________________________________________________________
+average_pooling1d_2 (Average (None, 157, 15)           0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 157, 15)           0         
+_________________________________________________________________
+conv1d_3 (Conv1D)            (None, 157, 10)           1810      
+_________________________________________________________________
+batch_normalization_3 (Batch (None, 157, 10)           40        
+_________________________________________________________________
+elu_3 (ELU)                  (None, 157, 10)           0         
+_________________________________________________________________
+average_pooling1d_3 (Average (None, 78, 10)            0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 78, 10)            0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 780)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 35)                27335     
+_________________________________________________________________
+batch_normalization_4 (Batch (None, 35)                140       
+_________________________________________________________________
+activation_1 (Activation)    (None, 35)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 15)                540       
+_________________________________________________________________
+batch_normalization_5 (Batch (None, 15)                60        
+_________________________________________________________________
+activation_2 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_3 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 50,398
+Trainable params: 50,204
+Non-trainable params: 194
+_________________________________________________________________
+subject 1, avg accuracy 0.7350877225399017/0.3771428577985082 over 10 splits
+subject 2, avg accuracy 0.7637427031993866/0.9764705889683996 over 10 splits
+subject 3, avg accuracy 0.8225146234035492/0.4491803267614437 over 10 splits
+subject 4, avg accuracy 0.8213450312614441/0.46810810809199876 over 10 splits
+subject 5, avg accuracy 0.813450300693512/0.4757894746253365 over 10 splits
+subject 6, avg accuracy 0.7833333373069763/0.4414893611948541 over 10 splits
+subject 7, avg accuracy 0.7763157904148101/0.3916201112989607 over 10 splits
+subject 8, avg accuracy 0.8263158023357391/0.4859374999999999 over 10 splits
+subject 9, avg accuracy 0.845321637392044/0.4074074066111019 over 10 splits
+subject 11, avg accuracy 0.764327484369278/0.5420212767225631 over 10 splits
+subject 12, avg accuracy 0.7631579041481018/0.45806451753903465 over 10 splits
+subject 13, avg accuracy 0.7695906430482864/0.40864864887417973 over 10 splits
+subject 14, avg accuracy 0.8428947448730468/0.4111702123855022 over 10 splits
+subject 15, avg accuracy 0.8116958975791931/0.546875 over 10 splits
+subject 16, avg accuracy 0.7655263245105743/0.38864864789150855 over 10 splits
+subject 17, avg accuracy 0.768421059846878/0.44375 over 10 splits
+subject 18, avg accuracy 0.7730994164943695/0.5695187156850642 over 10 splits
+subject 19, avg accuracy 0.8119883000850677/0.4390625 over 10 splits
+avg accuracy over all subjects 0.7921182624167865/0.48227251413602534
+subject 1, avg accuracy 0.7461988389492035/0.3897142863784518 over 10 splits
+subject 2, avg accuracy 0.7491228103637695/0.974866310893533 over 10 splits
+subject 3, avg accuracy 0.872222226858139/0.4289617479010358 over 10 splits
+subject 4, avg accuracy 0.815497076511383/0.4902702699803017 over 10 splits
+subject 5, avg accuracy 0.8178362607955932/0.43578947465670737 over 10 splits
+subject 6, avg accuracy 0.7672514617443085/0.4351063837396338 over 10 splits
+subject 7, avg accuracy 0.8032163739204407/0.40000000056607765 over 10 splits
+subject 8, avg accuracy 0.821052634716034/0.5015625 over 10 splits
+subject 9, avg accuracy 0.834502923488617/0.4264550272197951 over 10 splits
+subject 11, avg accuracy 0.7739766061305999/0.5414893608778082 over 10 splits
+subject 12, avg accuracy 0.7947368443012237/0.45430107629427346 over 10 splits
+subject 13, avg accuracy 0.8035087823867798/0.42270270176835956 over 10 splits
+subject 14, avg accuracy 0.8165789484977722/0.40797872486266684 over 10 splits
+subject 15, avg accuracy 0.7786549806594849/0.5546875 over 10 splits
+subject 16, avg accuracy 0.8128947496414185/0.3908108101664363 over 10 splits
+subject 17, avg accuracy 0.6631578892469406/0.4328125 over 10 splits
+subject 18, avg accuracy 0.8008771955966949/0.6101604278074866 over 10 splits
+subject 19, avg accuracy 0.7622807085514068/0.4270833333333333 over 10 splits
+avg accuracy over all subjects 0.790753739575545/0.4847084686914389
+subject 1, avg accuracy 0.7131578981876373/0.3702857147540365 over 10 splits
+subject 2, avg accuracy 0.7546783566474915/0.975401071431165 over 10 splits
+subject 3, avg accuracy 0.8494152069091797/0.4327868842362054 over 10 splits
+subject 4, avg accuracy 0.7894736945629119/0.4681081075120616 over 10 splits
+subject 5, avg accuracy 0.8008771955966949/0.44105263333571587 over 10 splits
+subject 6, avg accuracy 0.7622806906700135/0.4569148936804305 over 10 splits
+subject 7, avg accuracy 0.7491228193044662/0.3865921778219372 over 10 splits
+subject 8, avg accuracy 0.7947368562221527/0.4734375 over 10 splits
+subject 9, avg accuracy 0.8385964930057526/0.42116402088807375 over 10 splits
+subject 11, avg accuracy 0.7576023459434509/0.5718085105114795 over 10 splits
+subject 12, avg accuracy 0.7947368502616883/0.46505376449836194 over 10 splits
+subject 13, avg accuracy 0.7871345102787017/0.40972972895648024 over 10 splits
+subject 14, avg accuracy 0.8010526478290558/0.41702127634210795 over 10 splits
+subject 15, avg accuracy 0.8178362548351288/0.5427083333333333 over 10 splits
+subject 16, avg accuracy 0.7347368478775025/0.40540540448717166 over 10 splits
+subject 17, avg accuracy 0.7736842155456543/0.4552083333333334 over 10 splits
+subject 18, avg accuracy 0.7646198809146881/0.571657754648178 over 10 splits
+subject 19, avg accuracy 0.7900584816932679/0.4369791666666667 over 10 splits
+avg accuracy over all subjects 0.7818778470158577/0.4834064042464855
+subject 1, avg accuracy 0.7725146234035491/0.3720000008174352 over 10 splits
+subject 2, avg accuracy 0.7070175409317017/0.9705882363459644 over 10 splits
+subject 3, avg accuracy 0.8216374278068542/0.4366120215159297 over 10 splits
+subject 4, avg accuracy 0.7891812860965729/0.44540540497045267 over 10 splits
+subject 5, avg accuracy 0.8081871390342712/0.4873684235623008 over 10 splits
+subject 6, avg accuracy 0.7777777850627899/0.4829787227067541 over 10 splits
+subject 7, avg accuracy 0.7619883060455322/0.42346368753377284 over 10 splits
+subject 8, avg accuracy 0.8052631735801696/0.503125 over 10 splits
+subject 9, avg accuracy 0.8549707531929016/0.41534391442146246 over 10 splits
+subject 11, avg accuracy 0.7634502947330475/0.5500000005072735 over 10 splits
+subject 12, avg accuracy 0.8157894730567932/0.4801075272662665 over 10 splits
+subject 13, avg accuracy 0.7391812920570373/0.4064864865831427 over 10 splits
+subject 14, avg accuracy 0.8271052718162537/0.4345744684655616 over 10 splits
+subject 15, avg accuracy 0.7947368502616883/0.5625 over 10 splits
+subject 16, avg accuracy 0.7607894778251648/0.39189189200465735 over 10 splits
+subject 17, avg accuracy 0.7105263203382493/0.4302083333333333 over 10 splits
+subject 18, avg accuracy 0.7795321643352509/0.5647058829585498 over 10 splits
+subject 19, avg accuracy 0.8116958975791931/0.4510416666666666 over 10 splits
+avg accuracy over all subjects 0.7834080598420567/0.4893556483144179
+subject 1, avg accuracy 0.7611111164093017/0.385142857670784 over 10 splits
+subject 2, avg accuracy 0.7444444477558136/0.9743315518539856 over 10 splits
+subject 3, avg accuracy 0.8751462042331696/0.4568306000832 over 10 splits
+subject 4, avg accuracy 0.8350877165794373/0.4421621619688498 over 10 splits
+subject 5, avg accuracy 0.855847954750061/0.4921052646323254 over 10 splits
+subject 6, avg accuracy 0.7877192944288254/0.46382978704381495 over 10 splits
+subject 7, avg accuracy 0.7713450372219086/0.3653631285249188 over 10 splits
+subject 8, avg accuracy 0.8263157963752746/0.4947916666666667 over 10 splits
+subject 9, avg accuracy 0.8122807085514069/0.4148148149251939 over 10 splits
+subject 11, avg accuracy 0.7695906460285187/0.5537234030505445 over 10 splits
+subject 12, avg accuracy 0.8105263233184814/0.4607526890052262 over 10 splits
+subject 13, avg accuracy 0.7926900625228882/0.3956756756031835 over 10 splits
+subject 14, avg accuracy 0.8165789544582367/0.4069148939340672 over 10 splits
+subject 15, avg accuracy 0.784210529923439/0.546875 over 10 splits
+subject 16, avg accuracy 0.7971052765846253/0.3962162149435765 over 10 splits
+subject 17, avg accuracy 0.7315789461135864/0.4390625 over 10 splits
+subject 18, avg accuracy 0.7716374337673187/0.5545454558204203 over 10 splits
+subject 19, avg accuracy 0.8014619886875153/0.4390625 over 10 splits
+avg accuracy over all subjects 0.7969265798727672/0.4823444536514866
+subject 1, avg accuracy 0.7517543792724609/0.37485714361497335 over 10 splits
+subject 2, avg accuracy 0.6953216344118118/0.9695187174062679 over 10 splits
+subject 3, avg accuracy 0.8552631616592408/0.4174863382033962 over 10 splits
+subject 4, avg accuracy 0.8/0.46864864858421107 over 10 splits
+subject 5, avg accuracy 0.8228070139884949/0.4768421067062178 over 10 splits
+subject 6, avg accuracy 0.7710526347160339/0.4686170212131865 over 10 splits
+subject 7, avg accuracy 0.7502924025058746/0.4178770946890283 over 10 splits
+subject 8, avg accuracy 0.7894736886024475/0.5151041666666667 over 10 splits
+subject 9, avg accuracy 0.8488304018974304/0.4121693120983543 over 10 splits
+subject 11, avg accuracy 0.7318713366985321/0.551063830421326 over 10 splits
+subject 12, avg accuracy 0.8210526406764984/0.4865591405219929 over 10 splits
+subject 13, avg accuracy 0.8464912295341491/0.43783783753175987 over 10 splits
+subject 14, avg accuracy 0.7907894790172577/0.40265957440467587 over 10 splits
+subject 15, avg accuracy 0.7959064364433288/0.5567708333333334 over 10 splits
+subject 16, avg accuracy 0.7555263102054596/0.3729729723769265 over 10 splits
+subject 17, avg accuracy 0.7473684251308441/0.4505208333333333 over 10 splits
+subject 18, avg accuracy 0.8324561417102814/0.6069518719127471 over 10 splits
+subject 19, avg accuracy 0.7739766120910645/0.4546875 over 10 splits
+avg accuracy over all subjects 0.7877907738089561/0.4911747190565776
+subject 1, avg accuracy 0.7622807025909424/0.38685714354685374 over 10 splits
+subject 2, avg accuracy 0.7660818696022034/0.9764705890640218 over 10 splits
+subject 3, avg accuracy 0.843274861574173/0.42568305894488195 over 10 splits
+subject 4, avg accuracy 0.8599415242671966/0.4670270266081836 over 10 splits
+subject 5, avg accuracy 0.8140350878238678/0.5105263166051163 over 10 splits
+subject 6, avg accuracy 0.7616959035396575/0.4468085098139783 over 10 splits
+subject 7, avg accuracy 0.7660818696022034/0.40167597700430696 over 10 splits
+subject 8, avg accuracy 0.8105263233184814/0.4755208333333333 over 10 splits
+subject 9, avg accuracy 0.8491228103637696/0.39735449684202356 over 10 splits
+subject 11, avg accuracy 0.752923983335495/0.5505319142595251 over 10 splits
+subject 12, avg accuracy 0.789473682641983/0.481182796532108 over 10 splits
+subject 13, avg accuracy 0.813450288772583/0.4216216212994343 over 10 splits
+subject 14, avg accuracy 0.8123684287071228/0.42074468066083626 over 10 splits
+subject 15, avg accuracy 0.7956140279769898/0.5572916666666667 over 10 splits
+subject 16, avg accuracy 0.7021052658557891/0.3827027015911566 over 10 splits
+subject 17, avg accuracy 0.7210526406764984/0.4546875 over 10 splits
+subject 18, avg accuracy 0.8154970884323121/0.5893048128342245 over 10 splits
+subject 19, avg accuracy 0.789473682641983/0.4494791666666667 over 10 splits
+avg accuracy over all subjects 0.7902777800957361/0.4886372673485177
+subject 1, avg accuracy 0.7301169663667679/0.3794285722374916 over 10 splits
+subject 2, avg accuracy 0.758771938085556/0.9759358296101107 over 10 splits
+subject 3, avg accuracy 0.8824561417102814/0.4486338788694371 over 10 splits
+subject 4, avg accuracy 0.8435672521591187/0.44378378251114403 over 10 splits
+subject 5, avg accuracy 0.7915204703807831/0.48315789520740504 over 10 splits
+subject 6, avg accuracy 0.7383040994405746/0.48351063791741716 over 10 splits
+subject 7, avg accuracy 0.7494152128696442/0.37709497181729895 over 10 splits
+subject 8, avg accuracy 0.7736842155456543/0.4765624999999999 over 10 splits
+subject 9, avg accuracy 0.8646198868751526/0.412169311120712 over 10 splits
+subject 11, avg accuracy 0.7581871390342713/0.5393617019374319 over 10 splits
+subject 12, avg accuracy 0.8157894730567932/0.4655913989390096 over 10 splits
+subject 13, avg accuracy 0.7649122774600983/0.4367567568131395 over 10 splits
+subject 14, avg accuracy 0.7221052646636963/0.41436170174720444 over 10 splits
+subject 15, avg accuracy 0.7947368383407593/0.5458333333333333 over 10 splits
+subject 16, avg accuracy 0.7505263090133667/0.39189189124751733 over 10 splits
+subject 17, avg accuracy 0.6947368383407593/0.428125 over 10 splits
+subject 18, avg accuracy 0.773099422454834/0.577005348310751 over 10 splits
+subject 19, avg accuracy 0.8058479607105256/0.4161458333333333 over 10 splits
+avg accuracy over all subjects 0.7784665392504798/0.4830750191640409
+subject 1, avg accuracy 0.7888888955116272/0.3748571436234883 over 10 splits
+subject 2, avg accuracy 0.7710526287555695/0.9764705884265389 over 10 splits
+subject 3, avg accuracy 0.8292397618293762/0.43333333162336396 over 10 splits
+subject 4, avg accuracy 0.8543859720230103/0.44216216138891273 over 10 splits
+subject 5, avg accuracy 0.8388888955116272/0.48631579016384324 over 10 splits
+subject 6, avg accuracy 0.7502923965454101/0.4680851060025235 over 10 splits
+subject 7, avg accuracy 0.7716374337673187/0.4307262563505653 over 10 splits
+subject 8, avg accuracy 0.7473684251308441/0.4666666666666667 over 10 splits
+subject 9, avg accuracy 0.8426900625228881/0.42804232774272793 over 10 splits
+subject 11, avg accuracy 0.746198832988739/0.535638297999159 over 10 splits
+subject 12, avg accuracy 0.8157894849777222/0.45967742068472733 over 10 splits
+subject 13, avg accuracy 0.7982456266880036/0.46216216124392845 over 10 splits
+subject 14, avg accuracy 0.8007894873619079/0.4180851063195695 over 10 splits
+subject 15, avg accuracy 0.7625730931758881/0.5661458333333333 over 10 splits
+subject 16, avg accuracy 0.6826315820217133/0.38756756663322445 over 10 splits
+subject 17, avg accuracy 0.7736842095851898/0.4510416666666667 over 10 splits
+subject 18, avg accuracy 0.8105263113975525/0.6042780751850516 over 10 splits
+subject 19, avg accuracy 0.7625730991363525/0.4291666666666666 over 10 splits
+avg accuracy over all subjects 0.7859697888294855/0.49002345370671985
+subject 1, avg accuracy 0.7412280797958374/0.39942857220343186 over 10 splits
+subject 2, avg accuracy 0.7979532122612/0.979679145118132 over 10 splits
+subject 3, avg accuracy 0.84415203332901/0.4311475394853477 over 10 splits
+subject 4, avg accuracy 0.7997076094150544/0.4762162156201698 over 10 splits
+subject 5, avg accuracy 0.8394736886024475/0.501052631892656 over 10 splits
+subject 6, avg accuracy 0.7391812920570373/0.45053191463998016 over 10 splits
+subject 7, avg accuracy 0.7921052634716034/0.41284916249400416 over 10 splits
+subject 8, avg accuracy 0.8105263233184814/0.4817708333333333 over 10 splits
+subject 9, avg accuracy 0.8333333373069763/0.4264550267861634 over 10 splits
+subject 11, avg accuracy 0.7701754331588745/0.4994680854234289 over 10 splits
+subject 12, avg accuracy 0.8263157963752746/0.4865591407142659 over 10 splits
+subject 13, avg accuracy 0.787426906824112/0.41675675598350725 over 10 splits
+subject 14, avg accuracy 0.8118421018123627/0.42340425474846616 over 10 splits
+subject 15, avg accuracy 0.8067251443862915/0.5442708333333333 over 10 splits
+subject 16, avg accuracy 0.7594736874103546/0.38378378267223767 over 10 splits
+subject 17, avg accuracy 0.7578947305679321/0.4395833333333333 over 10 splits
+subject 18, avg accuracy 0.7997076094150544/0.6005347598045268 over 10 splits
+subject 19, avg accuracy 0.8178362488746643/0.4437500000000001 over 10 splits
+avg accuracy over all subjects 0.7963921387990317/0.48873566597701756
+subject 1, avg accuracy 0.7444444537162781/0.37885714374269763 over 10 splits
+subject 2, avg accuracy 0.7169590622186661/0.9716577557000248 over 10 splits
+subject 3, avg accuracy 0.8444444417953492/0.43715846846338174 over 10 splits
+subject 4, avg accuracy 0.7730994105339051/0.44378378404153357 over 10 splits
+subject 5, avg accuracy 0.8292397677898407/0.4705263164796327 over 10 splits
+subject 6, avg accuracy 0.7459064245223999/0.4728723401718951 over 10 splits
+subject 7, avg accuracy 0.7605263292789459/0.423463687783513 over 10 splits
+subject 8, avg accuracy 0.8052631616592407/0.4921875 over 10 splits
+subject 9, avg accuracy 0.8330409407615662/0.4322751317863111 over 10 splits
+subject 11, avg accuracy 0.764327484369278/0.5436170198181842 over 10 splits
+subject 12, avg accuracy 0.8421052753925323/0.45268817332483113 over 10 splits
+subject 13, avg accuracy 0.7929824471473694/0.4356756759817536 over 10 splits
+subject 14, avg accuracy 0.8157894730567932/0.40265957453149426 over 10 splits
+subject 15, avg accuracy 0.7675438642501831/0.5270833333333333 over 10 splits
+subject 16, avg accuracy 0.7239473640918732/0.38594594489883727 over 10 splits
+subject 17, avg accuracy 0.7210526287555694/0.4260416666666667 over 10 splits
+subject 18, avg accuracy 0.8488304197788239/0.5855614970074619 over 10 splits
+subject 19, avg accuracy 0.8008771896362304/0.44010416666666663 over 10 splits
+avg accuracy over all subjects 0.7850211188197136/0.48456439891101216
+subject 1, avg accuracy 0.7345029294490815/0.36857142902697837 over 10 splits
+subject 2, avg accuracy 0.7535087764263153/0.9754010705705631 over 10 splits
+subject 3, avg accuracy 0.8596491277217865/0.4491803272825773 over 10 splits
+subject 4, avg accuracy 0.8324561417102814/0.4729729717647707 over 10 splits
+subject 5, avg accuracy 0.8394736886024475/0.48315789498780914 over 10 splits
+subject 6, avg accuracy 0.7219298243522644/0.4808510635761504 over 10 splits
+subject 7, avg accuracy 0.7236842095851899/0.3659217878260426 over 10 splits
+subject 8, avg accuracy 0.7894736886024475/0.5083333333333333 over 10 splits
+subject 9, avg accuracy 0.8441520452499389/0.4068783064289068 over 10 splits
+subject 11, avg accuracy 0.7593567252159119/0.5420212769762 over 10 splits
+subject 12, avg accuracy 0.868421059846878/0.4763440868546886 over 10 splits
+subject 13, avg accuracy 0.7824561476707459/0.3994594594997328 over 10 splits
+subject 14, avg accuracy 0.8213157951831818/0.3962765945399061 over 10 splits
+subject 15, avg accuracy 0.8289473652839661/0.5473958333333334 over 10 splits
+subject 16, avg accuracy 0.760526317358017/0.38432432356718427 over 10 splits
+subject 17, avg accuracy 0.7263157904148102/0.4505208333333333 over 10 splits
+subject 18, avg accuracy 0.7900584697723388/0.597326203399801 over 10 splits
+subject 19, avg accuracy 0.778947377204895/0.45052083333333337 over 10 splits
+avg accuracy over all subjects 0.7897319710916944/0.48641431275748037
+subject 1, avg accuracy 0.7780701875686645/0.3742857150520597 over 10 splits
+subject 2, avg accuracy 0.7540935635566711/0.9748663103516726 over 10 splits
+subject 3, avg accuracy 0.8321637392044068/0.4382513661527894 over 10 splits
+subject 4, avg accuracy 0.9014619886875153/0.46594594494716546 over 10 splits
+subject 5, avg accuracy 0.8444444417953492/0.4842105264412728 over 10 splits
+subject 6, avg accuracy 0.7394736856222153/0.4680851055586592 over 10 splits
+subject 7, avg accuracy 0.766374260187149/0.39441340845390405 over 10 splits
+subject 8, avg accuracy 0.778947377204895/0.471875 over 10 splits
+subject 9, avg accuracy 0.8239766061306/0.41534391502066265 over 10 splits
+subject 11, avg accuracy 0.7298245668411255/0.528723404572365 over 10 splits
+subject 12, avg accuracy 0.8105263233184814/0.48172043100480116 over 10 splits
+subject 13, avg accuracy 0.7660818755626678/0.41189189203687615 over 10 splits
+subject 14, avg accuracy 0.8171052813529969/0.425531915210663 over 10 splits
+subject 15, avg accuracy 0.8114035129547119/0.553125 over 10 splits
+subject 16, avg accuracy 0.7042105317115783/0.375675674225833 over 10 splits
+subject 17, avg accuracy 0.7473684310913086/0.453125 over 10 splits
+subject 18, avg accuracy 0.7842105329036713/0.5951871659028976 over 10 splits
+subject 19, avg accuracy 0.778362563252449/0.4395833333333333 over 10 splits
+avg accuracy over all subjects 0.7871166371636921/0.4862133949036086
+subject 1, avg accuracy 0.7751461952924729/0.37085714385339197 over 10 splits
+subject 2, avg accuracy 0.7485380113124848/0.974866311116652 over 10 splits
+subject 3, avg accuracy 0.8266081929206848/0.4519125682652973 over 10 splits
+subject 4, avg accuracy 0.8064327538013458/0.46486486399495924 over 10 splits
+subject 5, avg accuracy 0.8342105209827423/0.46421052719417366 over 10 splits
+subject 6, avg accuracy 0.7663742661476135/0.4468085108919347 over 10 splits
+subject 7, avg accuracy 0.7964912354946136/0.4262569831902755 over 10 splits
+subject 8, avg accuracy 0.8105263352394104/0.4682291666666667 over 10 splits
+subject 9, avg accuracy 0.8499999940395355/0.4042328038228252 over 10 splits
+subject 11, avg accuracy 0.7406432807445527/0.5478723405523503 over 10 splits
+subject 12, avg accuracy 0.8000000059604645/0.4569892481770566 over 10 splits
+subject 13, avg accuracy 0.7818713426589966/0.40594594546266505 over 10 splits
+subject 14, avg accuracy 0.8015789568424225/0.4042553185148442 over 10 splits
+subject 15, avg accuracy 0.8011695981025696/0.525 over 10 splits
+subject 16, avg accuracy 0.7181578993797302/0.37783783627522954 over 10 splits
+subject 17, avg accuracy 0.7315789580345153/0.43229166666666663 over 10 splits
+subject 18, avg accuracy 0.7453216344118119/0.5561497326362579 over 10 splits
+subject 19, avg accuracy 0.7950292348861694/0.44375 over 10 splits
+avg accuracy over all subjects 0.7849821342362299/0.4790183870711804
+subject 1, avg accuracy 0.7081871271133423/0.3902857154096876 over 10 splits
+subject 2, avg accuracy 0.8345029354095459/0.9828877021284665 over 10 splits
+subject 3, avg accuracy 0.8540935695171357/0.4448087433811094 over 10 splits
+subject 4, avg accuracy 0.8002923965454102/0.4718918909575488 over 10 splits
+subject 5, avg accuracy 0.8450292408466339/0.48526315836529976 over 10 splits
+subject 6, avg accuracy 0.770175439119339/0.47606382953359727 over 10 splits
+subject 7, avg accuracy 0.7540935754776001/0.40279329623922955 over 10 splits
+subject 8, avg accuracy 0.7631578981876374/0.4885416666666667 over 10 splits
+subject 9, avg accuracy 0.8324561417102814/0.4164021156610005 over 10 splits
+subject 11, avg accuracy 0.7467836320400238/0.5372340414752351 over 10 splits
+subject 12, avg accuracy 0.7842105209827424/0.476881721904201 over 10 splits
+subject 13, avg accuracy 0.7868421196937561/0.40486486506623187 over 10 splits
+subject 14, avg accuracy 0.8013157963752746/0.41382978653654146 over 10 splits
+subject 15, avg accuracy 0.8286549687385559/0.5682291666666666 over 10 splits
+subject 16, avg accuracy 0.7602631568908691/0.3875675661177248 over 10 splits
+subject 17, avg accuracy 0.7473684251308441/0.4463541666666667 over 10 splits
+subject 18, avg accuracy 0.8166666746139526/0.5828876996741575 over 10 splits
+subject 19, avg accuracy 0.8116959035396576/0.4609375 over 10 splits
+avg accuracy over all subjects 0.7914327512184778/0.49098470180277953
+subject 1, avg accuracy 0.7345029294490815/0.37485714364051825 over 10 splits
+subject 2, avg accuracy 0.7271929919719696/0.9727272734603781 over 10 splits
+subject 3, avg accuracy 0.8385964930057526/0.45519125658631976 over 10 splits
+subject 4, avg accuracy 0.8286549746990204/0.46702702604435586 over 10 splits
+subject 5, avg accuracy 0.8666666686534882/0.4389473698013707 over 10 splits
+subject 6, avg accuracy 0.7333333373069764/0.47765957446808505 over 10 splits
+subject 7, avg accuracy 0.8093567311763763/0.4022346375874301 over 10 splits
+subject 8, avg accuracy 0.821052634716034/0.48177083333333337 over 10 splits
+subject 9, avg accuracy 0.8383041024208069/0.4132275127465763 over 10 splits
+subject 11, avg accuracy 0.7412280738353729/0.5446808504297378 over 10 splits
+subject 12, avg accuracy 0.8263157963752746/0.46935483922240556 over 10 splits
+subject 13, avg accuracy 0.7880116999149323/0.4054054049060151 over 10 splits
+subject 14, avg accuracy 0.806578952074051/0.41436170250811477 over 10 splits
+subject 15, avg accuracy 0.8391812801361084/0.553125 over 10 splits
+subject 16, avg accuracy 0.7286842197179795/0.3875675668104275 over 10 splits
+subject 17, avg accuracy 0.710526317358017/0.4348958333333333 over 10 splits
+subject 18, avg accuracy 0.7795321583747864/0.5737967911888571 over 10 splits
+subject 19, avg accuracy 0.8233918130397797/0.4098958333333333 over 10 splits
+avg accuracy over all subjects 0.7911728430125451/0.4820403583000328
+subject 1, avg accuracy 0.7733918070793152/0.3737142866339003 over 10 splits
+subject 2, avg accuracy 0.6947368443012237/0.9695187177250094 over 10 splits
+subject 3, avg accuracy 0.8766081869602204/0.45792349708861985 over 10 splits
+subject 4, avg accuracy 0.7932748615741729/0.4567567562734759 over 10 splits
+subject 5, avg accuracy 0.8078947365283966/0.49473684408162766 over 10 splits
+subject 6, avg accuracy 0.787426894903183/0.4648936173383226 over 10 splits
+subject 7, avg accuracy 0.7459064304828644/0.41508379906582427 over 10 splits
+subject 8, avg accuracy 0.8684210538864136/0.50625 over 10 splits
+subject 9, avg accuracy 0.8426900625228881/0.438624337930528 over 10 splits
+subject 11, avg accuracy 0.7084795355796814/0.5537234037480456 over 10 splits
+subject 12, avg accuracy 0.794736847281456/0.4494623666809451 over 10 splits
+subject 13, avg accuracy 0.7552631616592407/0.41999999917842246 over 10 splits
+subject 14, avg accuracy 0.7800000071525574/0.4026595742144483 over 10 splits
+subject 15, avg accuracy 0.7850877165794372/0.5411458333333333 over 10 splits
+subject 16, avg accuracy 0.7868421137332916/0.3897297287470586 over 10 splits
+subject 17, avg accuracy 0.7368421018123626/0.44010416666666663 over 10 splits
+subject 18, avg accuracy 0.8315789580345154/0.5550802146368485 over 10 splits
+subject 19, avg accuracy 0.7672514617443085/0.44375 over 10 splits
+avg accuracy over all subjects 0.7853573767675293/0.4873976190746153
+subject 1, avg accuracy 0.7616959095001221/0.37142857222897663 over 10 splits
+subject 2, avg accuracy 0.7494152069091797/0.9748663118497575 over 10 splits
+subject 3, avg accuracy 0.8178362548351288/0.44699453485142343 over 10 splits
+subject 4, avg accuracy 0.8102339208126068/0.4551351342491202 over 10 splits
+subject 5, avg accuracy 0.8502923965454101/0.4589473705856424 over 10 splits
+subject 6, avg accuracy 0.7771929860115051/0.46063829749188534 over 10 splits
+subject 7, avg accuracy 0.7766081988811493/0.38938547562620496 over 10 splits
+subject 8, avg accuracy 0.8210526287555695/0.4848958333333334 over 10 splits
+subject 9, avg accuracy 0.8760233879089355/0.406878306286991 over 10 splits
+subject 11, avg accuracy 0.7464912325143814/0.5654255326123947 over 10 splits
+subject 12, avg accuracy 0.8473684310913085/0.48333333410242557 over 10 splits
+subject 13, avg accuracy 0.7763157904148101/0.3827027024449529 over 10 splits
+subject 14, avg accuracy 0.8215789377689362/0.42287234004507673 over 10 splits
+subject 15, avg accuracy 0.7570175349712371/0.5552083333333334 over 10 splits
+subject 16, avg accuracy 0.7705263197422028/0.3902702689976305 over 10 splits
+subject 17, avg accuracy 0.7315789461135864/0.4442708333333333 over 10 splits
+subject 18, avg accuracy 0.7739766061305999/0.5839572207494216 over 10 splits
+subject 19, avg accuracy 0.8073099434375763/0.4458333333333333 over 10 splits
+avg accuracy over all subjects 0.7929174795746802/0.4846135408586243
+subject 1, avg accuracy 0.6929824531078339/0.38457142915896003 over 10 splits
+subject 2, avg accuracy 0.7798245549201965/0.9780748670432656 over 10 splits
+subject 3, avg accuracy 0.8602339148521423/0.4683060095609862 over 10 splits
+subject 4, avg accuracy 0.8324561417102814/0.47027026985142684 over 10 splits
+subject 5, avg accuracy 0.7584795355796814/0.46684210642387997 over 10 splits
+subject 6, avg accuracy 0.7877192974090577/0.44148936182894605 over 10 splits
+subject 7, avg accuracy 0.7608187019824981/0.40502793324393266 over 10 splits
+subject 8, avg accuracy 0.8421052634716034/0.4791666666666667 over 10 splits
+subject 9, avg accuracy 0.8391812860965728/0.431216931689984 over 10 splits
+subject 11, avg accuracy 0.7412280678749085/0.529787233662098 over 10 splits
+subject 12, avg accuracy 0.8368421137332916/0.47741935551166537 over 10 splits
+subject 13, avg accuracy 0.8026315808296204/0.41027026965005975 over 10 splits
+subject 14, avg accuracy 0.8057894825935363/0.4026595742778575 over 10 splits
+subject 15, avg accuracy 0.8008771896362304/0.5307291666666667 over 10 splits
+subject 16, avg accuracy 0.7602631688117981/0.38972972885982415 over 10 splits
+subject 17, avg accuracy 0.7210526436567306/0.4369791666666666 over 10 splits
+subject 18, avg accuracy 0.7678362607955933/0.6165775403141338 over 10 splits
+subject 19, avg accuracy 0.7342105269432068/0.4291666666666667 over 10 splits
+avg accuracy over all subjects 0.7846962324447102/0.48601579320798266
+subject 1, avg accuracy 0.7789473712444306/0.36971428643805637 over 10 splits
+subject 2, avg accuracy 0.7371345162391663/0.9737967918582141 over 10 splits
+subject 3, avg accuracy 0.8371345043182373/0.43989070955195714 over 10 splits
+subject 4, avg accuracy 0.8374269068241119/0.47567567551458206 over 10 splits
+subject 5, avg accuracy 0.8286549746990204/0.4621052636911995 over 10 splits
+subject 6, avg accuracy 0.7552631676197052/0.4867021281034388 over 10 splits
+subject 7, avg accuracy 0.7611111104488373/0.3927374306504287 over 10 splits
+subject 8, avg accuracy 0.7947368502616883/0.4802083333333334 over 10 splits
+subject 9, avg accuracy 0.8432748556137085/0.41322751325905005 over 10 splits
+subject 11, avg accuracy 0.7637426853179932/0.5276595748485404 over 10 splits
+subject 12, avg accuracy 0.8263157963752746/0.4639784954568391 over 10 splits
+subject 13, avg accuracy 0.7555555582046509/0.3956756754823633 over 10 splits
+subject 14, avg accuracy 0.8221052706241607/0.40159574353948546 over 10 splits
+subject 15, avg accuracy 0.8178362607955932/0.5598958333333334 over 10 splits
+subject 16, avg accuracy 0.7860526382923126/0.38432432298724717 over 10 splits
+subject 17, avg accuracy 0.7315789580345153/0.45052083333333337 over 10 splits
+subject 18, avg accuracy 0.7614035129547119/0.5711229944930357 over 10 splits
+subject 19, avg accuracy 0.8175438612699508/0.4494791666666666 over 10 splits
+avg accuracy over all subjects 0.7919899332854482/0.48323948736339456
+acc 0.7784665392504798/0.4830750191640409
+
+acc 0.7818778470158577/0.4834064042464855
+
+acc 0.7834080598420567/0.4893556483144179
+
+acc 0.7846962324447102/0.48601579320798266
+
+acc 0.7849821342362299/0.4790183870711804
+
+acc 0.7850211188197136/0.48456439891101216
+
+acc 0.7853573767675293/0.4873976190746153
+
+acc 0.7859697888294855/0.49002345370671985
+
+acc 0.7871166371636921/0.4862133949036086
+
+acc 0.7877907738089561/0.4911747190565776
+
+acc 0.7897319710916944/0.48641431275748037
+
+acc 0.7902777800957361/0.4886372673485177
+
+acc 0.790753739575545/0.4847084686914389
+
+acc 0.7911728430125451/0.4820403583000328
+
+acc 0.7914327512184778/0.49098470180277953
+
+acc 0.7919899332854482/0.48323948736339456
+
+acc 0.7921182624167865/0.48227251413602534
+
+acc 0.7929174795746802/0.4846135408586243
+
+acc 0.7963921387990317/0.48873566597701756
+
+acc 0.7969265798727672/0.4823444536514866
+
+avg over all trials and subjects 0.7884199993560712/0.4857117804271721
+end time
+Wed Apr  4 03:23:49 CEST 2018

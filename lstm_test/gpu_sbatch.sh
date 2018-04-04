@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 60:00:00
-#SBATCH -J vinodens
+#SBATCH -J BverbST
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -40,6 +40,8 @@ echo "copy done time"
 date
 
 python $PY_FILE $SNIC_TMP
+
+cp "${SNIC_TMP}/out_conf.mat" ./
 
 echo "end time"
 date
