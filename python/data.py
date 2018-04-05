@@ -2,6 +2,7 @@ import sys
 
 import numpy as np
 from scipy import io
+import h5py
 
 def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transpose=False):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
@@ -164,6 +165,33 @@ def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
                         mdata[sub][j + i, k] += nmult * np.std(mdata[sub][i, k]) * np.random.ranf(mdata[sub][i, k].shape)
 
     return mdata, my
+
+
+def load_spect(shuffle=True):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    x = []
+    y = []
+    for sub in [6]:
+        with h5py.File('{}/DATA/Modified/spectogram/Y{}.mat'.format(snic_tmp, sub)) as f:
+            t = f['Y']
+            print(t.shape)
+            y = np.zeros((t.shape[1], 3))
+            for i in range(t.shape[1]):
+                y[i, int(t[0, i]) - 1] = 1
+
+            print(len(y))
+
+        with h5py.File('{}/DATA/Modified/spectogram/X{}.mat'.format(snic_tmp, sub)) as f:
+            t = f['X']
+            print(t.shape)
+            x = np.array([np.transpose(f[t[0, i]], (2, 1, 0)) for i in range(t.shape[1])])
+
+            print(len(x))
+            print(x[0].shape)
+
+    return (x, y)
 
 
 def load_spect_downsample(visual=True, shuffle=True, ds=8):
