@@ -6,14 +6,12 @@ from scipy import io
 
 import tensorflow as tf
 
-from keras.models import Sequential, Model
+from keras.models import Model
 from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
-from keras.layers import TimeDistributed, Lambda, AlphaDropout
-from keras.layers import SimpleRNN, RNN, LSTM, GRU
-from keras.layers import Conv2D, MaxPooling2D, Flatten
-from keras.layers import ELU, PReLU, Activation, AveragePooling2D
+from keras.layers import Lambda
+from keras.layers import Conv2D, MaxPooling2D, AveragePooling2D
+from keras.layers import ELU, Activation, Flatten
 
-from keras.optimizers import SGD, Adam, RMSprop, Nadam
 from keras import backend as K
 
 from tensorflow.python.client import device_lib
@@ -24,6 +22,8 @@ import util
 
 
 x, y = data.load_spect()
+
+print(x.shape)
 
 splits = 5
 
@@ -66,20 +66,20 @@ m_save = model.get_config()
 model.summary()
 
 acc = 0
-for tr, val in util.kfold(len(x), splits, shuffle=True):
+tr, val = util.kfold(len(x), splits, shuffle=True)[0]
 
-    model = Model.from_config(m_save)
-    model.compile(loss='categorical_crossentropy',
-                  optimizer='adam',
-                  metrics=['accuracy'])
-    # fit with next kfold data
-    h = model.fit(x[tr], y[tr],
-                  validation_data=(x[val], y[val]),
-                  batch_size=16, epochs=50, verbose=1)
+model = Model.from_config(m_save)
+model.compile(loss='categorical_crossentropy',
+              optimizer='adam',
+              metrics=['accuracy'])
+# fit with next kfold data
+h = model.fit(x[tr], y[tr],
+              validation_data=(x[val], y[val]),
+              batch_size=16, epochs=50, verbose=1)
 
-    _, a = model.evaluate(x[val], y[val], verbose=0)
-    acc += a
+_, a = model.evaluate(x[val], y[val], verbose=0)
+acc += a
 
-acc /= splits
+#acc /= splits
 
 print("avg accuracy {} over {} splits".format(acc, splits))

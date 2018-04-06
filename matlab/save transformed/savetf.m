@@ -16,8 +16,8 @@ end
 
 size(X{1})
 
-save('C:\Users\Albin Heimerson\Desktop\exjobb\DATA\Modified\spectogram\X6.mat', 'X','-v7.3')
-save('C:\Users\Albin Heimerson\Desktop\exjobb\DATA\Modified\spectogram\Y6.mat', 'Y','-v7.3')
+%save('C:\Users\Albin Heimerson\Desktop\exjobb\DATA\Modified\spectogram\X6.mat', 'X','-v7.3')
+%save('C:\Users\Albin Heimerson\Desktop\exjobb\DATA\Modified\spectogram\Y6.mat', 'Y','-v7.3')
 
-%save('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectrogram/???', X)
-%save('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectrogram/???', Y)
+save('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/X6.mat', 'X', '-v7.3')
+save('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/Y6.mat', 'Y', '-v7.3')

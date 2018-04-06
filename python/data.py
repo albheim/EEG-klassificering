@@ -167,7 +167,7 @@ def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
     return mdata, my
 
 
-def load_spect(shuffle=True):
+def load_spect():
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
@@ -188,7 +188,7 @@ def load_spect(shuffle=True):
             print(t.shape)
             x = np.array([np.transpose(f[t[0, i]], (2, 1, 0)) for i in range(t.shape[1])])
 
-            print(len(x))
+            print(x.shape)
             print(x[0].shape)
 
     return (x, y)
