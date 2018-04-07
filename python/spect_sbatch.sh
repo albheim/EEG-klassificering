@@ -39,7 +39,7 @@ du -h "${SNIC_TMP}/DATA"
 echo "copy done time"
 date
 
-matlab -nodisplay -nosplash -nodesktop -r "run('../matlab/save transformed/savetf.m');"
+#matlab -nodisplay -nosplash -nodesktop -r "run('../matlab/save transformed/savetf.m');"
 python $PY_FILE $SNIC_TMP
 
 echo "end time"

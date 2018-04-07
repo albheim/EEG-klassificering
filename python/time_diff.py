@@ -121,10 +121,10 @@ for j in range(n_models):
                 _, a = model.evaluate(xte[:, t:t+p_size], yte, verbose=0)
                 a2.append(a)
 
+            # do a1/a2 avg over subject before jultiply?
             a1 = np.array(a1).reshape((len(a1), 1))
             a2 = np.array(a2).reshape((len(a2), 1))
             heatmap += a1 * a2.T
-            print(heatmap)
 
             acc += np.max(a1)
 

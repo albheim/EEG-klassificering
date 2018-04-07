@@ -33,7 +33,6 @@ splits = 5
 #     xt[i] = xt[i][:, :, channels]
 
 
-
 m_in = Input(shape=x[0].shape)
 
 m_t = Conv2D(4, (8, 16), padding='same')(m_in)
@@ -66,20 +65,20 @@ m_save = model.get_config()
 model.summary()
 
 acc = 0
-tr, val = util.kfold(len(x), splits, shuffle=True)[0]
+for tr, val in util.kfold(len(x), splits, shuffle=True):
 
-model = Model.from_config(m_save)
-model.compile(loss='categorical_crossentropy',
-              optimizer='adam',
-              metrics=['accuracy'])
-# fit with next kfold data
-h = model.fit(x[tr], y[tr],
-              validation_data=(x[val], y[val]),
-              batch_size=16, epochs=50, verbose=1)
+    model = Model.from_config(m_save)
+    model.compile(loss='categorical_crossentropy',
+                  optimizer='adam',
+                  metrics=['accuracy'])
+    # fit with next kfold data
+    h = model.fit(x[tr], y[tr],
+                  #validation_data=(x[val], y[val]),
+                  batch_size=16, epochs=50, verbose=0)
 
-_, a = model.evaluate(x[val], y[val], verbose=0)
-acc += a
+    _, a = model.evaluate(x[val], y[val], verbose=0)
+    acc += a
 
-#acc /= splits
+acc /= splits
 
 print("avg accuracy {} over {} splits".format(acc, splits))
