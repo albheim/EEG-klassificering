@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 60:00:00
-#SBATCH -J timediff
+#SBATCH -J tdiff10f
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err

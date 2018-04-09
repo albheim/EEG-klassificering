@@ -31,7 +31,7 @@ print(x[0].shape, xt[0].shape)
 #settings
 splits = 10
 n_subs = len(x)
-n_models = 20
+n_models = 1
 bin_size = 40
 n_bins = 6
 p_size = bin_size * n_bins
@@ -89,55 +89,54 @@ model.summary()
 
 
 # train
-for j in range(n_models):
-    avgacc = 0
-    for i in range(n_subs):
-        n = x[i].shape[0]
-        acc = 0
-        for tr, val in util.kfold(n, splits, shuffle=True):
-            # recreate model
-            model = Model.from_config(m_save)
-            model.compile(loss='categorical_crossentropy',
-                          optimizer='adam',
-                          metrics=['accuracy'])
+avgacc = 0
+for i in range(n_subs):
+    n = x[i].shape[0]
+    acc = 0
+    for tr, val in util.kfold(n, splits, shuffle=True):
+        # recreate model
+        model = Model.from_config(m_save)
+        model.compile(loss='categorical_crossentropy',
+                      optimizer='adam',
+                      metrics=['accuracy'])
 
-            # fit with next kfold data
-            xtr = x[i][tr]
-            ytr = y[i][tr]
-            xva = x[i][val]
-            yva = y[i][val]
-            xte = xt[i]
-            yte = yt[i]
-            for k in range(10):
-                for t in train_tp:
-                    model.fit(xtr[:, t:t+p_size], ytr,
-                              batch_size=8, epochs=2, verbose=0)
+        # fit with next kfold data
+        xtr = x[i][tr]
+        ytr = y[i][tr]
+        xva = x[i][val]
+        yva = y[i][val]
+        xte = xt[i]
+        yte = yt[i]
+        for k in range(10):
+            for t in train_tp:
+                model.fit(xtr[:, t:t+p_size], ytr,
+                          batch_size=8, epochs=2, verbose=0)
 
-            a1 = []
-            a2 = []
-            for t in pred_tp:
-                _, a = model.evaluate(xva[:, t:t+p_size], yva, verbose=0)
-                a1.append(a)
-                _, a = model.evaluate(xte[:, t:t+p_size], yte, verbose=0)
-                a2.append(a)
+        a1 = []
+        a2 = []
+        for t in pred_tp:
+            _, a = model.evaluate(xva[:, t:t+p_size], yva, verbose=0)
+            a1.append(a)
+            _, a = model.evaluate(xte[:, t:t+p_size], yte, verbose=0)
+            a2.append(a)
 
-            # do a1/a2 avg over subject before jultiply?
-            a1 = np.array(a1).reshape((len(a1), 1))
-            a2 = np.array(a2).reshape((len(a2), 1))
-            heatmap += a1 * a2.T
+        # do a1/a2 avg over subject before jultiply?
+        a1 = np.array(a1).reshape((len(a1), 1))
+        a2 = np.array(a2).reshape((len(a2), 1))
+        heatmap += a1 * a2.T
 
-            acc += np.max(a1)
+        acc += np.max(a1)
 
-        K.clear_session()
+    K.clear_session()
 
-        acc /= splits
-        print("subject {} avg of max acc over {} splits {}".format(i, splits, acc))
-        avgacc += acc
+    acc /= splits
+    print("subject {} avg of max acc over {} splits {}".format(i, splits, acc))
+    avgacc += acc
 
-    avgacc /= n_subs
-    print("avg over subjects", avgacc)
+avgacc /= n_subs
+print("avg over subjects", avgacc)
 
 print(heatmap)
-np.savetxt("heatmap.txt", delimiter=',')
+np.savetxt("heatmap2.txt", heatmap, delimiter=',')
 
 

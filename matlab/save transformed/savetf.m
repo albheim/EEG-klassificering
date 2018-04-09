@@ -1,7 +1,7 @@
 clear; clc; close all
 addpath('..')
 addpath('../borrowed code')
-[X,Y,n] = aux_load('Visual','06');
+[X,Y,n] = aux_load('Visual','05');
 
 param.L = 8; param.Fs = 512; param.NFFT = 4096; param.NSTEP = 4;
 
