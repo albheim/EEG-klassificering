@@ -31,7 +31,7 @@ print(x[0].shape, xt[0].shape)
 #settings
 splits = 10
 n_subs = len(x)
-n_models = 1
+n_models = 5
 bin_size = 40
 n_bins = 6
 p_size = bin_size * n_bins
