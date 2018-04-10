@@ -21,7 +21,7 @@ import data
 import util
 
 
-x, y = data.load_spect()
+x, y = data.load_spect([5])
 
 print(x.shape)
 
@@ -33,7 +33,7 @@ splits = 5
 #     xt[i] = xt[i][:, :, channels]
 
 
-m_in = Input(shape=x[0].shape)
+m_in = Input(shape=x[0][0].shape)
 
 m_t = Conv2D(4, (8, 16), padding='same')(m_in)
 #m_t = BatchNormalization()(m_t)
@@ -65,18 +65,18 @@ m_save = model.get_config()
 model.summary()
 
 acc = 0
-for tr, val in util.kfold(len(x), splits, shuffle=True):
+for tr, val in util.kfold(len(x[0]), splits, shuffle=True):
 
     model = Model.from_config(m_save)
     model.compile(loss='categorical_crossentropy',
                   optimizer='adam',
                   metrics=['accuracy'])
     # fit with next kfold data
-    h = model.fit(x[tr], y[tr],
+    h = model.fit(x[0][tr], y[0][tr],
                   #validation_data=(x[val], y[val]),
                   batch_size=16, epochs=50, verbose=0)
 
-    _, a = model.evaluate(x[val], y[val], verbose=0)
+    _, a = model.evaluate(x[0][val], y[0][val], verbose=0)
     acc += a
 
 acc /= splits

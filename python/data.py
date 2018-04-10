@@ -167,29 +167,31 @@ def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
     return mdata, my
 
 
-def load_spect():
+def load_spect(idx):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
     x = []
     y = []
-    for sub in [6]:
-        with h5py.File('{}/DATA/Modified/spectogram/Y{}.mat'.format(snic_tmp, sub)) as f:
+    for sub in idx:
+        fname = '{}/DATA/Modified/spectogram/U{}.mat'.format(snic_tmp, sub)
+        print(fname)
+        with h5py.File(fname) as f:
             t = f['Y']
             print(t.shape)
-            y = np.zeros((t.shape[1], 3))
+            yn = np.zeros((t.shape[1], 3))
             for i in range(t.shape[1]):
-                y[i, int(t[0, i]) - 1] = 1
+                yn[i, int(t[0, i]) - 1] = 1
 
-            print(len(y))
+            y.append(yn)
 
-        with h5py.File('{}/DATA/Modified/spectogram/X{}.mat'.format(snic_tmp, sub)) as f:
             t = f['X']
             print(t.shape)
-            x = np.array([np.transpose(f[t[0, i]], (2, 1, 0)) for i in range(t.shape[1])])
+            xn = np.array([np.transpose(f[t[0, i]], (2, 1, 0)) for i in range(t.shape[1])])
 
-            print(x.shape)
-            print(x[0].shape)
+            print(xn.shape)
+            print(xn[0].shape)
+            x.append(xn)
 
     return (x, y)
 
