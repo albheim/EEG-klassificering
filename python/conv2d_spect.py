@@ -23,7 +23,7 @@ import util
 
 x, y = data.load_spect([5])
 
-splits = 10
+splits = 5
 
 # channels = [4, 23]
 # for i in range(n_subs):
@@ -33,28 +33,28 @@ splits = 10
 
 m_in = Input(shape=x[0][0].shape)
 
-m_t = Conv2D(4, (8, 8), padding='same')(m_in)
+m_t = Conv2D(4, (8, 8), padding='valid')(m_in)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling2D((4, 2))(m_t)
 m_t = Dropout(0.2)(m_t)
 
-m_t = Conv2D(8, (8, 8), padding='same')(m_t)
+m_t = Conv2D(8, (8, 8), padding='valid')(m_t)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling2D((4, 2))(m_t)
 m_t = Dropout(0.3)(m_t)
 
-m_t = Conv2D(16, (8, 8), padding='same')(m_t)
+m_t = Conv2D(16, (8, 8), padding='valid')(m_t)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling2D((2, 2))(m_t)
 m_t = Dropout(0.4)(m_t)
 
 m_t = Flatten()(m_t)
-m_t = Dense(15)(m_t)
+#m_t = Dense(15)(m_t)
 #m_t = BatchNormalization()(m_t)
-m_t = Activation('tanh')(m_t)
+#m_t = Activation('tanh')(m_t)
 m_out = Dense(3, activation='softmax')(m_t)
 
 model = Model(inputs=m_in, outputs=m_out)
@@ -71,7 +71,7 @@ for tr, val in util.kfold(len(x[0]), splits, shuffle=True):
                   metrics=['accuracy'])
     # fit with next kfold data
     h = model.fit(x[0][tr], y[0][tr],
-                  #validation_data=(x[val], y[val]),
+                  validation_data=(x[0][val], y[0][val]),
                   batch_size=16, epochs=50, verbose=0)
 
     _, a = model.evaluate(x[0][val], y[0][val], verbose=0)
