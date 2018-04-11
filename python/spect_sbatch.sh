@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 60:00:00
-#SBATCH -J ach5n
+#SBATCH -J 2chs5
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -25,6 +25,9 @@ cat $0
 PY_FILE="conv2d_spect.py"
 echo "py file"
 cat $PY_FILE
+
+echo "data file"
+cat "data.py"
 
 echo "mat file"
 cat "../matlab/save transformed/savetf.m"

@@ -5,10 +5,10 @@ addpath('../borrowed code')
 
 param.L = 8; param.Fs = 512; param.NFFT = 1024; param.NSTEP = 2;
 
-%X = aux_chan(X,[5 24]);
+X = aux_chan(X,[5 24]);
 X = aux_extr(X, 769:1024);
 %X = aux_deci(X,2);
-X = aux_svd(X, 1);
+%X = aux_svd(X, 1);
 X = aux_transform(X, 'spec', param);
 
 for i = 1:length(X)

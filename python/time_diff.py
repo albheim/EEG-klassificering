@@ -31,12 +31,12 @@ print(x[0].shape, xt[0].shape)
 #settings
 splits = 10
 n_subs = len(x)
-bin_size = 49
-n_bins = 5
+bin_size = 40
+n_bins = 6
 p_size = bin_size * n_bins
 
 start = 700
-end = 1400
+end = 1600
 last = end - p_size
 timepoints = range(start, last, bin_size)
 steps = len(timepoints)
@@ -85,6 +85,7 @@ for i in range(n_subs):
     n = x[i].shape[0]
 
     # get data for sub i
+    i = 4
     xtr = x[i]
     ytr = y[i]
     xte = xt[i]
@@ -110,5 +111,5 @@ for i in range(n_subs):
 
 heatmap /= n_subs
 print(heatmap)
-np.savetxt("heatmap_unique_classifier_small_model.txt", heatmap, delimiter=',')
+np.savetxt("timepoints_sub5_18reps.csv", heatmap, delimiter=',')
 
