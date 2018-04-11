@@ -23,9 +23,7 @@ import util
 
 x, y = data.load_spect([5])
 
-print(x.shape)
-
-splits = 5
+splits = 10
 
 # channels = [4, 23]
 # for i in range(n_subs):
@@ -35,22 +33,22 @@ splits = 5
 
 m_in = Input(shape=x[0][0].shape)
 
-m_t = Conv2D(4, (8, 16), padding='same')(m_in)
+m_t = Conv2D(4, (8, 8), padding='same')(m_in)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
-m_t = AveragePooling2D((2, 16))(m_t)
+m_t = AveragePooling2D((4, 2))(m_t)
 m_t = Dropout(0.2)(m_t)
 
-m_t = Conv2D(8, (8, 16), padding='same')(m_t)
+m_t = Conv2D(8, (8, 8), padding='same')(m_t)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
-m_t = AveragePooling2D((2, 8))(m_t)
+m_t = AveragePooling2D((4, 2))(m_t)
 m_t = Dropout(0.3)(m_t)
 
-m_t = Conv2D(16, (4, 8), padding='same')(m_t)
+m_t = Conv2D(16, (8, 8), padding='same')(m_t)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
-m_t = AveragePooling2D((2, 8))(m_t)
+m_t = AveragePooling2D((2, 2))(m_t)
 m_t = Dropout(0.4)(m_t)
 
 m_t = Flatten()(m_t)

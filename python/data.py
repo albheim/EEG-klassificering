@@ -187,7 +187,16 @@ def load_spect(idx):
 
             t = f['X']
             print(t.shape)
-            xn = np.array([np.transpose(f[t[0, i]], (2, 1, 0)) for i in range(t.shape[1])])
+            xn = np.zeros(tuple([t.shape[1]]) + f[t[0, 0]].shape)
+            for i in range(t.shape[1]):
+                print(f[t[0, i]].shape)
+                xn[i] = np.array(f[t[0, i]])
+
+            print(xn.shape)
+            if len(xn.shape) < 4:
+                xn = xn[:, :, :, np.newaxis]
+            else:
+                xn = np.transpose(xn, (0, 2, 3, 1))
 
             print(xn.shape)
             print(xn[0].shape)
