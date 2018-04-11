@@ -18,10 +18,10 @@ for i = 1:36
     N = sum(n); r = 8;
 
     X = aux_extr(X,769:1024);
-    X = aux_chan(X,[5 15 24]);
-    %X = aux_svd(X,1:2);
+    %X = aux_chan(X,15);
+    X = aux_svd(X,1:2);
     X = aux_deci(X,r);
-    X = aux_feat(X);
+    %X = aux_feat(X);
     %X = aux_covm(X);
     %X = aux_chan(X,1:2);
 

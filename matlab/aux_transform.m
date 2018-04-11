@@ -7,6 +7,8 @@ function out = aux_transform(in, method, param)
 %           Wigner domain ('wig')
 %           Ambiguity function ('amb')
 %           Filtered Wigner (coming soon(TM))
+%           Wavelet transform ('cwt')
+%           Multitaper with Slepian windows ('slep')
 %
 % param:  Struct containing parameters relevant for the method.
 %
@@ -25,6 +27,17 @@ function out = aux_transform(in, method, param)
 %               par    - Choose opt. parameter (default 1)
 %               Fs     - Sampling frequency
 %               NFFT   - Number of FFT points
+%
+% Wavelet:      wlet   - Type of wavelet (opt.)
+%                        'morse', 'amor' (Morlet), 'bump'
+%
+% Slepian:      L      - Window length
+%               NW     - Number of bases (you get 2NW-3 basis functions)
+%                        (typical value NW=3)
+%               Fs     - Sampling frequency
+%               NFFT   - Number of FFT points
+%               NSTEP  - Number of steps to the next frame
+%               wei    - Weights of MT specs (opt.)
 %
 % out:    3-dim output array with first dimension N, rest transf. vars
 
@@ -57,7 +70,7 @@ for i = 1:length(in)
             end
             out{i} = zeros(N,P,param.NFFT/2);
             for j = 1:N
-                out{i}(j,:,:) = quadtf(in{i}(j,:)',...
+                out{i}(j,:,:) = quadtf(hilbert(in{i}(j,:))',...
                              param.method,...
                              param.par,...
                              param.Fs,...
@@ -69,11 +82,42 @@ for i = 1:length(in)
             end
             out{i} = zeros(N,param.NFFT,P);
             for j = 1:N
-                out{i}(j,:,:) = quadamb(in{i}(j,:)',...
+                out{i}(j,:,:) = quadamb(hilbert(in{i}(j,:))',...
                              param.method,...
                              param.par,...
                              param.Fs,...
                              param.NFFT);
+            end
+        case 'cwt'
+            if nargin<3
+                param.wlet = 'morse';
+            elseif ~any(contains(fields(param),'wlet'))
+                param.wlet = 'morse';
+            end
+            [m,n] = size(cwt(in{i}(1,:)',param.wlet));
+            out{i} = zeros(N,m,n);
+            for j = 1:N
+                out{i}(j,:,:) = cwt(in{i}(j,:)',param.wlet);
+            end
+        case 'slep'
+            out{i} = zeros(N,ceil(P/param.NSTEP),param.NFFT/2);
+            [E,~] = dpss(L,NW);
+            E = E(:,1:2*NW-3);
+            if any(contains(fields(param),'wei'))
+                for j = 1:N
+                    out{i}(j,:,:) = mtspectrogram(in{i}(j,:)',E,...
+                                                        param.Fs,...
+                                                        param.NFFT,...
+                                                        param.NSTEP,...
+                                                        param.wei);
+                end
+            else
+                for j = 1:N
+                    out{i}(j,:,:) = mtspectrogram(in{i}(j,:)',E,...
+                                                        param.Fs,...
+                                                        param.NFFT,...
+                                                        param.NSTEP);
+                end
             end
         otherwise
             warning('Wrong type of method specified');

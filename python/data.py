@@ -189,7 +189,6 @@ def load_spect(idx):
             print(t.shape)
             xn = np.zeros(tuple([t.shape[1]]) + f[t[0, 0]].shape)
             for i in range(t.shape[1]):
-                print(f[t[0, i]].shape)
                 xn[i] = np.array(f[t[0, i]])
 
             print(xn.shape)
