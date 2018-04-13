@@ -3,9 +3,9 @@ addpath('..')
 addpath('../borrowed code')
 [X,Y,n] = aux_load('Visual','05');
 
-param.L = 8; param.Fs = 512; param.NFFT = 2048; param.NSTEP = 2;
+param.L = 8; param.Fs = 512; param.NFFT = 512; param.NSTEP = 2;
 
-X = aux_chan(X,[5 24 29]);
+X = aux_chan(X,[5 24]);
 X = aux_extr(X, 769:1536);
 %X = aux_deci(X,2);
 %X = aux_svd(X, 1);

@@ -72,7 +72,7 @@ for tr, val in util.kfold(len(x[0]), splits, shuffle=True):
     # fit with next kfold data
     h = model.fit(x[0][tr], y[0][tr],
                   validation_data=(x[0][val], y[0][val]),
-                  batch_size=16, epochs=50, verbose=0)
+                  batch_size=16, epochs=50, verbose=1)
 
     _, a = model.evaluate(x[0][val], y[0][val], verbose=0)
     acc += a

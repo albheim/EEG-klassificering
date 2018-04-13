@@ -12,14 +12,16 @@ X = aux_extr(X, 769:1024);
 %X = aux_transform(X, 'spec', param);
 X = aux_covm(X);
 
-for i = 1:10
+figure
+f_PlotEEG_BrainNetwork(31)
+
+figure
+for i = 1:6
     aij = X{i};
 
-    nch = 31; %take care of this variable (nch must be according to matrix size you want to plot it)
     p = 0.03;   %proportion of weigthed links to keep for.
     aij = threshold_proportional(aij, p); %thresholding networks due to proportion p
     ijw = adj2edgeL(triu(aij));             %passing from matrix form to edge list form
-
-    figure
-    f_PlotEEG_BrainNetwork(nch, ijw, 'w_wn2wx');
+    subplot(2, 3, i);
+    f_PlotEEG_BrainNetwork(31, ijw, 'w_wn2wx');
 end
