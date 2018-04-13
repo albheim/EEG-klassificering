@@ -65,7 +65,7 @@ def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False,
     return (x, y)
 
 
-def load_all(cut=True, visual=True):
+def load_all(cut=True, visual=True, study=True, transpose=False):
     x = None
     y = None
 
@@ -75,7 +75,7 @@ def load_all(cut=True, visual=True):
         subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
 
     for sub in subs:  # 19 is max
-        xn, yn = load_single_sub(sub, cut, visual)
+        xn, yn = load_single_sub(sub, cut, study, False, visual, transpose)
         if x is None:
             x = xn
             y = yn
@@ -167,14 +167,14 @@ def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
     return mdata, my
 
 
-def load_spect(idx):
+def load_transform(idx, trans):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
     x = []
     y = []
     for sub in idx:
-        fname = '{}/DATA/Modified/spectogram/U{}.mat'.format(snic_tmp, sub)
+        fname = '{}/DATA/Modified/spectogram/{}-{}.mat'.format(snic_tmp, trans, sub)
         print(fname)
         with h5py.File(fname) as f:
             t = f['Y']

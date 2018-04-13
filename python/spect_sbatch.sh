@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 60:00:00
-#SBATCH -J 2chs5
+#SBATCH -J cwt5
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -45,7 +45,7 @@ du -h "${SNIC_TMP}/DATA"
 echo "copy done time"
 date
 
-matlab -nodisplay -nosplash -nodesktop -r "run('../matlab/save transformed/savetf.m');"
+#matlab -nodisplay -nosplash -nodesktop -r "run('../matlab/save transformed/savetf.m');"
 python $PY_FILE $SNIC_TMP
 
 echo "end time"

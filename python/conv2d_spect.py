@@ -13,6 +13,7 @@ from keras.layers import Conv2D, MaxPooling2D, AveragePooling2D
 from keras.layers import ELU, Activation, Flatten
 
 from keras import backend as K
+from keras import regularizers as rg
 
 from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
@@ -21,7 +22,7 @@ import data
 import util
 
 
-x, y = data.load_spect([5])
+x, y = data.load_transform([5], 'cwt')
 
 splits = 5
 
@@ -33,28 +34,28 @@ splits = 5
 
 m_in = Input(shape=x[0][0].shape)
 
-m_t = Conv2D(4, (8, 8), padding='valid')(m_in)
+m_t = Conv2D(4, (4, 8), padding='same', kernel_regularizer=rg.l1(0.01))(m_in)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
-m_t = AveragePooling2D((4, 2))(m_t)
+m_t = AveragePooling2D((2, 4))(m_t)
 m_t = Dropout(0.2)(m_t)
 
-m_t = Conv2D(8, (8, 8), padding='valid')(m_t)
+m_t = Conv2D(8, (4, 8), padding='same', kernel_regularizer=rg.l1(0.01))(m_t)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
-m_t = AveragePooling2D((4, 2))(m_t)
+m_t = AveragePooling2D((2, 4))(m_t)
 m_t = Dropout(0.3)(m_t)
 
-m_t = Conv2D(16, (8, 8), padding='valid')(m_t)
+m_t = Conv2D(16, (4, 8), padding='same', kernel_regularizer=rg.l1(0.01))(m_t)
 #m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling2D((2, 2))(m_t)
 m_t = Dropout(0.4)(m_t)
 
 m_t = Flatten()(m_t)
-#m_t = Dense(15)(m_t)
+m_t = Dense(15, kernel_regularizer=rg.l1(0.01))(m_t)
 #m_t = BatchNormalization()(m_t)
-#m_t = Activation('tanh')(m_t)
+m_t = Activation('tanh')(m_t)
 m_out = Dense(3, activation='softmax')(m_t)
 
 model = Model(inputs=m_in, outputs=m_out)
