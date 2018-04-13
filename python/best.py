@@ -14,6 +14,7 @@ from keras.layers import Conv1D, MaxPooling1D, Flatten
 from keras.layers import ELU, PReLU, Activation, AveragePooling1D
 
 from keras.optimizers import SGD, Adam, RMSprop, Nadam
+from keras import regularizers as rg
 from keras import backend as K
 
 from tensorflow.python.client import device_lib
@@ -23,8 +24,8 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True, visual=False, transpose=True)
-xt, yt = data.load_single(cut=True, visual=False, study=False, transpose=True)
+x, y = data.load_single(cut=True, visual=True, transpose=True)
+xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
 print(x[0].shape, xt[0].shape)
 
 splits = 10
@@ -53,19 +54,19 @@ for j in range(n_models):
     m_off = Lambda(offset_slice)(m_in)
     m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
 
-    m_t = Conv1D(30, 64, padding='causal')(m_noise)
+    m_t = Conv1D(30, 64, padding='causal', kernel_regularizer=rg.l1(0.01))(m_noise)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
     m_t = Dropout(0.2)(m_t)
 
-    m_t = Conv1D(15, 32, padding='causal')(m_t)
+    m_t = Conv1D(15, 32, padding='causal', kernel_regularizer=rg.l1(0.01))(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
     m_t = Dropout(0.3)(m_t)
 
-    m_t = Conv1D(10, 16, padding='causal')(m_t)
+    m_t = Conv1D(10, 16, padding='causal', kernel_regularizer=rg.l1(0.01))(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
@@ -75,7 +76,7 @@ for j in range(n_models):
     # m_t = Dense(35)(m_t)
     # m_t = BatchNormalization()(m_t)
     # m_t = Activation('tanh')(m_t)
-    m_t = Dense(15)(m_t)
+    m_t = Dense(15, kernel_regularizer=rg.l1(0.01))(m_t)
     m_t = BatchNormalization()(m_t)
     m_t = Activation('tanh')(m_t)
     m_out = Dense(3, activation='softmax')(m_t)

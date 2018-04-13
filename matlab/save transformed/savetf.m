@@ -3,13 +3,13 @@ addpath('..')
 addpath('../borrowed code')
 [X,Y,n] = aux_load('Visual','05');
 
-param.L = 8; param.Fs = 512; param.NFFT = 2048; param.NSTEP = 2;
+param.L = 8; param.Fs = 512; param.NFFT = 1024; param.NSTEP = 2; param.method = 'l-ind';
 
-X = aux_chan(X,[5 24 29]);
+%X = aux_chan(X,[5 24 29]);
 X = aux_extr(X, 769:1536);
 %X = aux_deci(X,2);
 %X = aux_svd(X, 1);
-X = aux_transform(X, 'spec', param);
+X = aux_transform(X, 'wig', param);
 
 for i = 1:length(X)
     X{i} = permute(X{i}, [2 3 1]);
@@ -17,6 +17,6 @@ end
 
 size(X{1})
 
-save('C:\Users\Albin Heimerson\Desktop\exjobb\DATA\Modified\spectogram\U5.mat', 'X', 'Y', '-v7.3')
+%save('C:\Users\Albin Heimerson\Desktop\exjobb\DATA\Modified\spectogram\U5.mat', 'X', 'Y', '-v7.3')
 
-%save('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/U5.mat', 'X', 'Y', '-v7.3')
+save('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/wig-5.mat', 'X', 'Y', '-v7.3')
