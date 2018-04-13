@@ -24,9 +24,15 @@ import data
 import util
 
 
-x, y = data.load_all(cut=True, visual=True, study=True, transpose=True)
-xt, yt = data.load_all(cut=True, visual=True, study=False, transpose=True)
+x, y = data.load_single(cut=True, visual=True, study=True, transpose=True)
+xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
 print(x[0].shape, xt[0].shape)
+
+x = np.concatenate(x, axis=0)
+y = np.concatenate(y, axis=0)
+xt = np.concatenate(xt, axis=0)
+yt = np.concatenate(yt, axis=0)
+print(x.shape, xt.shape)
 
 splits = 10
 
