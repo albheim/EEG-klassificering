@@ -4,12 +4,12 @@ addpath('../borrowed code')
 sub = '05';
 [X,Y,n] = aux_load('Visual',sub);
 
-param.L = 8; param.Fs = 512; param.NFFT = 1024; param.NSTEP = 8; 
+param.L = 8; param.Fs = 512; param.NFFT = 512; param.NSTEP = 1; 
 param.method = 'l-ind'; param.NW = 3;
 
 %X = aux_chan(X,[5 24 29]);
 X = aux_extr(X, 769:1536);
-%X = aux_deci(X,2);
+X = aux_deci(X,4);
 %X = aux_svd(X, 1);
 for method = ["spec", "wig", "amb", "cwt", "slep"]
     Xt = aux_transform(X, method, param);
