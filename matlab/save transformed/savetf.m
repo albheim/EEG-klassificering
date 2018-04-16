@@ -20,9 +20,9 @@ for method = ["spec", "wig", "amb", "cwt", "slep"]
     method
     size(Xt{1})
 
-    save(sprintf('C:\\Users\\Albin Heimerson\\Desktop\\exjobb\\DATA\\Modified\\spectogram\\%s_%s.mat', method, sub), 'Xt', 'Y', '-v7.3')
+    %save(sprintf('C:\\Users\\Albin Heimerson\\Desktop\\exjobb\\DATA\\Modified\\spectogram\\%s_%s.mat', method, sub), 'Xt', 'Y', '-v7.3')
 
-    %save(sprintf('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/%s_%s.mat', method, sub), 'X', 'Y', '-v7.3')
+    save(sprintf('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/%s_%s.mat', method, sub), 'X', 'Y', '-v7.3')
 end
 
 
