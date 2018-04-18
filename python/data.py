@@ -4,6 +4,7 @@ import numpy as np
 from scipy import io
 import h5py
 
+
 def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transpose=False):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:

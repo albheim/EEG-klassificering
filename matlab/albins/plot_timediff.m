@@ -1,6 +1,6 @@
 clc; close all;
 
-Z = csvread('time_bins_classification.csv');
+Z = csvread('timepoints_sub5_18reps.csv');
 
 binsize = 40;
 nbins = 6;
