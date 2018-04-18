@@ -21,3 +21,5 @@ nvidia-smi
 
 echo $SNIC_SITE
 echo $SNIC_RESOURCE
+
+echo "asdf %j sdf"

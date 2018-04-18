@@ -3,8 +3,10 @@
 #SBATCH -J matlab
 #SBATCH -A lu2018-2-3
 
-# shold be lu or gpu
-#SBATCH -p lu
+# should be lu or gpu
+#SBATCH -p gpu
+
+#SBATCH --gres=gpu:4
 
 #SBATCH --tasks-per-node 20
 #SBATCH --mem-per-cpu=3100

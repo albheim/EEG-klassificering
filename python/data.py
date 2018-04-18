@@ -174,7 +174,7 @@ def load_transform(idx, trans):
     x = []
     y = []
     for sub in idx:
-        fname = '{}/DATA/Modified/spectogram/{}-{}.mat'.format(snic_tmp, trans, sub)
+        fname = '{}/DATA/Modified/spectogram/{}_{:02}.mat'.format(snic_tmp, trans, sub)
         print(fname)
         with h5py.File(fname) as f:
             t = f['Y']
@@ -185,13 +185,14 @@ def load_transform(idx, trans):
 
             y.append(yn)
 
-            t = f['X']
+            t = f['Xt']
             print(t.shape)
-            xn = np.zeros(tuple([t.shape[1]]) + f[t[0, 0]].shape)
+            xn = [None for i in range(t.shape[1])]
             for i in range(t.shape[1]):
                 xn[i] = np.array(f[t[0, i]])
 
-            print(xn.shape)
+            xn = np.stack(xn, 0)
+
             if len(xn.shape) < 4:
                 xn = xn[:, :, :, np.newaxis]
             else:

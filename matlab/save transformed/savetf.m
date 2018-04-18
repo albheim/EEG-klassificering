@@ -11,18 +11,20 @@ param.method = 'l-ind'; param.NW = 3;
 X = aux_extr(X, 769:1536);
 X = aux_deci(X,4);
 %X = aux_svd(X, 1);
-for method = ["spec", "wig", "amb", "cwt", "slep"]
+
+ms = ["spec", "wig", "amb", "cwt", "slep"]
+for method = ms(4)
     Xt = aux_transform(X, method, param);
 
     for i = 1:length(Xt)
-        Xt{i} = permute(Xt{i}, [2 3 1]);
+        Xt{i} = real(permute(Xt{i}, [2 3 1]));
     end
     method
     size(Xt{1})
 
     %save(sprintf('C:\\Users\\Albin Heimerson\\Desktop\\exjobb\\DATA\\Modified\\spectogram\\%s_%s.mat', method, sub), 'Xt', 'Y', '-v7.3')
 
-    save(sprintf('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/%s_%s.mat', method, sub), 'X', 'Y', '-v7.3')
+    save(sprintf('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/%s_%s.mat', method, sub), 'Xt', 'Y', '-v7.3')
 end
 
 
