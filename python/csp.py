@@ -12,10 +12,10 @@ import copy as cp
 import numpy as np
 from scipy import linalg
 
-from .mixin import TransformerMixin
-from .base import BaseEstimator
-from ..cov import _regularized_covariance
-from ..utils import warn
+from mne.decoding.mixin import TransformerMixin
+from mne.decoding.base import BaseEstimator
+from mne.cov import _regularized_covariance
+from mne.utils import warn
 
 
 class CSP(TransformerMixin, BaseEstimator):
@@ -417,7 +417,7 @@ class CSP(TransformerMixin, BaseEstimator):
         fig : instance of matplotlib.figure.Figure
            The figure.
         """
-        from .. import EvokedArray
+        from mne import EvokedArray
         if components is None:
             components = np.arange(self.n_components)
 
@@ -567,7 +567,7 @@ class CSP(TransformerMixin, BaseEstimator):
         fig : instance of matplotlib.figure.Figure
            The figure.
         """
-        from .. import EvokedArray
+        from mne import EvokedArray
         if components is None:
             components = np.arange(self.n_components)
 

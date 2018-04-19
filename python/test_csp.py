@@ -30,14 +30,11 @@ from sklearn.pipeline import Pipeline
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import ShuffleSplit, cross_val_score
 
-from mne import Epochs, pick_types, find_events, create_info
+from mne import create_info
 from mne.channels import read_layout
-from mne.io import concatenate_raws, read_raw_edf, RawArray
-from mne.datasets import eegbci
-from mne.decoding import CSP
+from csp import CSP
 
 import data
-import sys
 
 print(__doc__)
 
@@ -50,7 +47,7 @@ tmin, tmax = -1.5, 2.5
 event_id = dict(FA=0, LM=1, OB=2)
 subject = 5
 
-x, y = data.load_single_sub(subject, cut=False)
+x, y = data.load_single_sub(subject, cut=False, shuffle=False)
 x_t = x[:, :, 768:1280]
 y = np.where(y==1)[1]
 print(x.shape, x_t.shape, y.shape)
@@ -84,10 +81,15 @@ clf = Pipeline([('CSP', csp), ('LDA', lda)])
 scores = cross_val_score(clf, epochs_data_train, labels, cv=cv, n_jobs=1)
 
 # Printing the results
-class_balance = np.mean(labels == labels[0])
-class_balance = max(class_balance, 1. - class_balance)
-print("Classification accuracy: %f / Chance level: %f" % (np.mean(scores),
-                                                          class_balance))
+print(labels)
+nc = len(np.unique(labels))
+N = len(labels)
+pc = 1.0 / nc
+qc = 1 - pc
+class_balance = pc + 1.645 * (pc * qc / N)**0.5
+print("Classification accuracy: %f / Chance level for equally "\
+      "probable classes with p=0.05: %f" % (np.mean(scores),
+                                           class_balance))
 
 # plot CSP patterns estimated on full data for visualization
 csp.fit_transform(epochs_data, labels)
@@ -99,7 +101,7 @@ csp.plot_patterns(info, layout=layout, ch_type='eeg',
 ###############################################################################
 # Look at performance over time
 
-sfreq = raw.info['sfreq']
+sfreq = info['sfreq']
 w_length = int(sfreq * 0.5)   # running classifier: window length
 w_step = int(sfreq * 0.1)  # running classifier: window step size
 w_start = np.arange(0, epochs_data.shape[2] - w_length, w_step)
@@ -128,7 +130,7 @@ w_times = (w_start + w_length / 2.) / sfreq + tmin
 plt.figure()
 plt.plot(w_times, np.mean(scores_windows, 0), label='Score')
 plt.axvline(0, linestyle='--', color='k', label='Onset')
-plt.axhline(0.5, linestyle='-', color='k', label='Chance')
+plt.axhline(class_balance, linestyle='-', color='k', label='Chance')
 plt.xlabel('time (s)')
 plt.ylabel('classification accuracy')
 plt.title('Classification score over time')
