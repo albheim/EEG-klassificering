@@ -5,10 +5,13 @@ from scipy import io
 import h5py
 
 
-def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transpose=False):
-    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transpose=False, user="Albin"):
+    if user=="Damir":
+        snic_tmp = "/Users/damir/Documents/EEG-data"
+    else:
+        snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/DATA"
     if len(sys.argv) > 1:
-        snic_tmp = str(sys.argv[1])
+        snic_tmp = str(sys.argv[1]) + "/DATA"
     xn = None
     yn = None
     names = ["FA", "LM", "OB"]
@@ -20,7 +23,8 @@ def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transp
             name += "_{}".format("visual" if visual else "lexical")
 
         print("loading: ", name)
-        m = io.loadmat('{}/DATA/{}/{}.mat'.format(snic_tmp,
+
+        m = io.loadmat('{}/{}/{}.mat'.format(snic_tmp,
                                                   "Visual" if visual else "Verbal",
                                                   name))
         trials = m[name][0][0][2][0]
