@@ -1,6 +1,6 @@
 clc; close all;
 
-Z = csvread('timepoints_sub5_18reps.csv');
+Z = csvread('time_bins_classification.csv');
 
 binsize = 40;
 nbins = 6;
@@ -16,4 +16,5 @@ pcolor(X,Y,Z);
 title('test accuracy in time bins for classifiers trained on time bins')
 xlabel('prediction time for test in ms after onset')
 ylabel('training time for study in ms after onset')
-colorbar
+hcb = colorbar
+ylabel(hcb, 'Classification accuracy on test')

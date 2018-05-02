@@ -99,6 +99,8 @@ for j in range(n_models):
             model.compile(loss='categorical_crossentropy',
                           optimizer='adam',
                           metrics=['accuracy'])
+            print(len(model.get_weights()))
+            print(model.get_weights()[0].shape)
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
