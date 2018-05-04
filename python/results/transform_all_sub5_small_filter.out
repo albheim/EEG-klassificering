@@ -1,0 +1,801 @@
+data dir
+/lunarc/nobackup/users/albheim/EEG-klassificering
+script
+#!/bin/sh
+#SBATCH -t 60:00:00
+#SBATCH -J all5smal
+#SBATCH -A lu2018-2-3
+#// SBATCH -o stdout_%j.out
+#// SBATCH -e stderr_%j.err
+
+# shold be lu or gpu
+#SBATCH -p gpu
+
+# how many gpus, 4 per node, using many seems to crash more often so stick with 1
+#SBATCH --gres=gpu:4
+
+# use 5 cores per GPU
+#SBATCH -n 20
+#SBATCH --mem-per-cpu=3100
+
+DATA_DIR="$(cat ../data_location.txt)"
+echo "data dir"
+echo $DATA_DIR
+
+echo "script"
+cat $0
+
+PY_FILE="conv2d_spect.py"
+echo "py file"
+cat $PY_FILE
+
+echo "data file"
+cat "data.py"
+
+echo "mat file"
+cat "../matlab/save transformed/savetf.m"
+
+echo "nvidia smi"
+nvidia-smi
+
+echo "start time"
+date
+
+cp -r "${DATA_DIR}/DATA" $SNIC_TMP
+ls $SNIC_TMP
+du -h "${SNIC_TMP}/DATA"
+
+echo "copy done time"
+date
+
+#matlab -nodisplay -nosplash -nodesktop -r "run('../matlab/save transformed/savetf.m');"
+python $PY_FILE $SNIC_TMP
+
+echo "end time"
+date
+py file
+import sys
+from datetime import datetime
+
+import numpy as np
+from scipy import io
+
+import tensorflow as tf
+
+from keras.models import Model
+from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
+from keras.layers import Lambda
+from keras.layers import Conv2D, MaxPooling2D, AveragePooling2D
+from keras.layers import ELU, Activation, Flatten
+
+from keras import backend as K
+from keras import regularizers as rg
+
+from tensorflow.python.client import device_lib
+print(device_lib.list_local_devices())
+
+import data
+import util
+
+funcs = ["spec", "wig", "amb", "cwt", "slep"]
+subs = [5]
+
+for func in funcs:
+    x, y = data.load_transform(subs, func)
+    xt, yt = data.load_transform(subs, func, test=True)
+
+    splits = 10
+
+    # channels = [4, 23]
+    # for i in range(n_subs):
+    #     x[i] = x[i][:, :, channels]
+    #     xt[i] = xt[i][:, :, channels]
+
+
+    m_in = Input(shape=x[0][0].shape)
+
+    m_t = Conv2D(4, (4, 4), padding='same')(m_in) #, kernel_regularizer=rg.l1(0.01)
+    #m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling2D((3, 3))(m_t)
+    m_t = Dropout(0.2)(m_t)
+
+    m_t = Conv2D(8, (4, 4), padding='same')(m_t)
+    #m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling2D((3, 3))(m_t)
+    m_t = Dropout(0.3)(m_t)
+
+    m_t = Conv2D(16, (4, 4), padding='same')(m_t)
+    #m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling2D((3, 3))(m_t)
+    m_t = Dropout(0.3)(m_t)
+
+    m_t = Flatten()(m_t)
+    m_t = Dense(10, kernel_regularizer=rg.l1(0.01))(m_t)
+    #m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_out = Dense(3, activation='softmax')(m_t)
+
+    model = Model(inputs=m_in, outputs=m_out)
+
+    m_save = model.get_config()
+    model.summary()
+
+    acc = 0
+    acc2 = 0
+    for tr, val in util.kfold(len(x[0]), splits, shuffle=True):
+
+        model = Model.from_config(m_save)
+        model.compile(loss='categorical_crossentropy',
+                      optimizer='adam',
+                      metrics=['accuracy'])
+        # fit with next kfold data
+        h = model.fit(x[0][tr], y[0][tr],
+                      #validation_data=(x[0][val], y[0][val]),
+                      batch_size=16, epochs=50, verbose=0)
+
+        _, a = model.evaluate(x[0][val], y[0][val], verbose=0)
+        _, a2 = model.evaluate(xt[0], yt[0], verbose=0)
+        acc += a
+        acc2 += a2
+
+    acc /= splits
+    acc2 /= splits
+
+    print("{} gave avg accuracy {}/{} over {} splits".format(func, acc, acc2, splits))
+data file
+import sys
+
+import numpy as np
+from scipy import io
+import h5py
+
+
+def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transpose=False):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    xn = None
+    yn = None
+    names = ["FA", "LM", "OB"]
+    for i in range(3):
+        name = "Subj{:02}_CleanData_{}_{}".format(sub,
+                                                  'study' if study else 'test',
+                                                  names[i])
+        if not study:
+            name += "_{}".format("visual" if visual else "lexical")
+
+        print("loading: ", name)
+        m = io.loadmat('{}/DATA/{}/{}.mat'.format(snic_tmp,
+                                                  "Visual" if visual else "Verbal",
+                                                  name))
+        trials = m[name][0][0][2][0]
+        for j in range(trials.shape[0]):
+            if cut:
+                trials[j] = trials[j][:, 768:1536]
+            if transpose:
+                trials[j] = trials[j].T
+        labels = np.zeros((trials.shape[0], 3))
+        labels[:, i] = 1
+        if xn is None:
+            xn = trials
+            yn = labels
+        else:
+            xn = np.concatenate((xn, trials), axis=0)
+            yn = np.concatenate((yn, labels), axis=0)
+
+    xn = np.stack(xn, axis=0)
+    n = xn.shape[0]
+    s = np.arange(n)
+    if shuffle:
+        np.random.shuffle(s)
+
+    return (xn[s], yn[s])
+
+
+def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False,
+                study=True):
+    x = []
+    y = []
+
+    if idx is None:
+        if visual:
+            idx = [i if i < 10 else i + 1 for i in range(1, 19)]
+        else:
+            idx = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+    for sub in idx:
+        xn, yn = load_single_sub(sub, cut, study, shuffle, visual, transpose)
+        x.append(xn)
+        y.append(yn)
+
+    return (x, y)
+
+
+def load_all(cut=True, visual=True, study=True, transpose=False):
+    x = None
+    y = None
+
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(1, 19)]
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+    for sub in subs:  # 19 is max
+        xn, yn = load_single_sub(sub, cut, study, False, visual, transpose)
+        if x is None:
+            x = xn
+            y = yn
+        else:
+            x = np.concatenate((x, x), axis=0)
+            y = np.concatenate((y, y), axis=0)
+
+    print(x.shape, y.shape)
+    x = np.stack(x, axis=0)
+    print(x.shape)
+    s = np.arange(x.shape[0])
+    np.random.shuffle(s)
+
+    return (x[s], y[s])
+
+
+def load_marg(cut=None, visual=True, shuffle=True):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    x = []
+    y = []
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(1, 19)]
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+    for sub in subs:
+        xn = None
+        yn = None
+        for i in range(3):
+            name = "Subj{:02}_{}_marg".format(sub, "Visual" if visual else "Verbal")
+            print("loading: ", name)
+            m = io.loadmat('{}/DATA/Modified/marginal/{}.mat'.format(snic_tmp, name))
+
+            trials = m['data'][0][0][i][:, 0]
+            if cut is not None:
+                for j in range(trials.shape[0]):
+                    trials[j] = trials[j][:, cut[0]:cut[1]]
+            labels = np.zeros((trials.shape[0], 3))
+            labels[:, i] = 1
+            if xn is None:
+                xn = trials
+                yn = labels
+            else:
+                xn = np.concatenate((xn, trials), axis=0)
+                yn = np.concatenate((yn, labels), axis=0)
+
+        xn = np.stack(xn, axis=0)
+        n = xn.shape[0]
+        s = np.arange(n)
+        if shuffle:
+            np.random.shuffle(s)
+        x.append(xn[s])
+        y.append(yn[s])
+
+    print(x[0].shape)
+    return (x, y)
+
+
+def cut(data, cut=[768, 1536], tcut = None):
+    if tcut is not None:
+        cut[0] = int(512 * tcut[0] + 768)
+        cut[1] = int(512 * tcut[1] + 768)
+    print(cut)
+    for sub in range(len(data)):
+        data[sub] = data[sub][:, :, cut[0]:cut[1]]
+
+
+def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
+    mdata = [None for i in range(len(x))]
+    my = [None for i in range(len(x))]
+    for sub in range(len(mdata)):
+        s = x[sub].shape[0]
+        my[sub] = np.zeros((s * n, 3))
+        for j in range(0, s * n, s):
+            my[sub][j:j + s] = y[sub]
+        mdata[sub] = np.zeros((s * n, x[sub].shape[1], cut[1] - cut[0]))
+        mdata[sub][:s, :, :] = x[sub][:, :, cut[0]:cut[1]]
+        for j in range(s, s * n, s):
+            for i in range(len(x[sub])):
+                if displacement > 0:
+                    d = np.random.randint(-displacement, displacement + 1)
+                    mdata[sub][j:j + s, :, :] = x[sub][:, :, cut[0] + d:cut[1] + d]
+
+                if nmult != 0:
+                    for k in range(mdata[sub][i].shape[0]):
+                        mdata[sub][j + i, k] += nmult * np.std(mdata[sub][i, k]) * np.random.ranf(mdata[sub][i, k].shape)
+
+    return mdata, my
+
+
+def load_transform(idx, trans, test=False):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    x = []
+    y = []
+    for sub in idx:
+        fname = '{}/DATA/Modified/spectogram/{}_{:02}{}.mat'.format(snic_tmp, trans, sub, 
+                                                                    '_t' if test else '')
+        print(fname)
+        with h5py.File(fname) as f:
+            t = f['Y']
+            print(t.shape)
+            yn = np.zeros((t.shape[1], 3))
+            for i in range(t.shape[1]):
+                yn[i, int(t[0, i]) - 1] = 1
+
+            y.append(yn)
+
+            t = f['Xt']
+            print(t.shape)
+            xn = [None for i in range(t.shape[1])]
+            for i in range(t.shape[1]):
+                xn[i] = np.array(f[t[0, i]])
+
+            xn = np.stack(xn, 0)
+
+            if len(xn.shape) < 4:
+                xn = xn[:, :, :, np.newaxis]
+            else:
+                xn = np.transpose(xn, (0, 2, 3, 1))
+
+            print(xn.shape)
+            print(xn[0].shape)
+            x.append(xn)
+
+    return (x, y)
+
+
+def load_spect_downsample(visual=True, shuffle=True, ds=8):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    x = []
+    y = []
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(2, 19)] # change to 1
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+    for sub in subs:
+        xn = None
+        yn = None
+        for i in range(3):
+            name = "Subj{:02}_{}_spec{}".format(sub, "Visual" if visual else "Verbal", ds)
+            print("loading: ", name)
+            m = io.loadmat('{}/DATA/Modified/spect_downsample/{}.mat'.format(snic_tmp, name))
+
+            trials = m['data'][0][0][i][:, 0]
+            labels = np.zeros((trials.shape[0], 3))
+            labels[:, i] = 1
+            if xn is None:
+                xn = trials
+                yn = labels
+            else:
+                xn = np.concatenate((xn, trials), axis=0)
+                yn = np.concatenate((yn, labels), axis=0)
+
+        xn = np.stack(xn, axis=0)
+        n = xn.shape[0]
+        s = np.arange(n)
+        if shuffle:
+            np.random.shuffle(s)
+        x.append(xn[s])
+        y.append(yn[s])
+
+    print(x[0].shape)
+    return (x, y)
+mat file
+clear; clc; close all
+addpath('..')
+addpath('../borrowed code')
+
+for idx = [1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17 18 19]
+    sub = sprintf('%02d', idx);
+    [X,Y,n] = aux_load('Visual',sub, 1);
+
+    param.L = 8; param.Fs = 512; param.NFFT = 512; param.NSTEP = 1; 
+    param.method = 'l-ind'; param.NW = 3;
+
+    %X = aux_chan(X,[5 24 29]);
+    X = aux_extr(X, 769:1536);
+    X = aux_deci(X,4);
+    %X = aux_svd(X, 1);
+
+    ms = ["spec", "wig", "amb", "cwt", "slep"]
+    for method = ms
+        Xt = aux_transform(X, method, param);
+
+        for i = 1:length(Xt)
+            Xt{i} = real(permute(Xt{i}, [2 3 1]));
+        end
+        method
+        size(Xt{1})
+
+        %save(sprintf('C:\\Users\\Albin Heimerson\\Desktop\\exjobb\\DATA\\Modified\\spectogram\\%s_%s.mat', method, sub), 'Xt', 'Y', '-v7.3')
+
+        save(sprintf('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/%s_%s_t.mat', method, sub), 'Xt', 'Y', '-v7.3')
+    end
+end
+
+nvidia smi
+Thu Apr 19 16:22:58 2018       
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 390.46                 Driver Version: 390.46                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla K80           On   | 00000000:04:00.0 Off |                    0 |
+| N/A   22C    P8    26W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   1  Tesla K80           On   | 00000000:05:00.0 Off |                    0 |
+| N/A   28C    P8    29W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   2  Tesla K80           On   | 00000000:84:00.0 Off |                    0 |
+| N/A   23C    P8    26W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   3  Tesla K80           On   | 00000000:85:00.0 Off |                    0 |
+| N/A   28C    P8    29W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|  No running processes found                                                 |
++-----------------------------------------------------------------------------+
+start time
+Thu Apr 19 16:22:58 CEST 2018
+DATA
+2.4G	/local/slurmtmp.632255/DATA/Visual
+2.4G	/local/slurmtmp.632255/DATA/Verbal
+388M	/local/slurmtmp.632255/DATA/Modified/marginal
+32G	/local/slurmtmp.632255/DATA/Modified/spectogram
+33G	/local/slurmtmp.632255/DATA/Modified
+37G	/local/slurmtmp.632255/DATA
+copy done time
+Thu Apr 19 16:30:09 CEST 2018
+2018-04-19 16:30:17.438023: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-04-19 16:30:17.703911: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-04-19 16:30:17.841153: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-04-19 16:30:17.995447: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-04-19 16:30:18.156729: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-04-19 16:30:18.157454: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-04-19 16:30:18.157576: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-04-19 16:30:18.157606: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-04-19 16:30:18.157626: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-04-19 16:30:18.157643: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-04-19 16:30:18.157660: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-04-19 16:30:18.157689: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-04-19 16:30:18.157738: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-04-19 16:30:18.157762: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-04-19 16:30:18.157782: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-04-19 16:30:48.246551: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-04-19 16:30:48.246678: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-04-19 16:30:48.246702: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-04-19 16:30:48.246720: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 12820345983508186622
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 5074189495502586617
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 1
+}
+incarnation: 9465114676422315877
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 505694322361385134
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 1735166497854339240
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.632255/DATA/Modified/spectogram/spec_05.mat
+(1, 187)
+(1, 187)
+(187, 256, 192, 31)
+(256, 192, 31)
+/local/slurmtmp.632255/DATA/Modified/spectogram/spec_05_t.mat
+(1, 109)
+(1, 109)
+(109, 256, 192, 31)
+(256, 192, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 256, 192, 31)      0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 256, 192, 4)       1988      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 256, 192, 4)       0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 85, 64, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 85, 64, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 85, 64, 8)         520       
+_________________________________________________________________
+elu_2 (ELU)                  (None, 85, 64, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 28, 21, 8)         0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 28, 21, 8)         0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 28, 21, 16)        2064      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 28, 21, 16)        0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 9, 7, 16)          0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 9, 7, 16)          0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 1008)              0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 10)                10090     
+_________________________________________________________________
+activation_1 (Activation)    (None, 10)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 33        
+=================================================================
+Total params: 14,695
+Trainable params: 14,695
+Non-trainable params: 0
+_________________________________________________________________
+spec gave avg accuracy 0.6786549746990204/0.34678899127682417 over 10 splits
+/local/slurmtmp.632255/DATA/Modified/spectogram/wig_05.mat
+(1, 187)
+(1, 187)
+(187, 256, 192, 31)
+(256, 192, 31)
+/local/slurmtmp.632255/DATA/Modified/spectogram/wig_05_t.mat
+(1, 109)
+(1, 109)
+(109, 256, 192, 31)
+(256, 192, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_2 (InputLayer)         (None, 256, 192, 31)      0         
+_________________________________________________________________
+conv2d_4 (Conv2D)            (None, 256, 192, 4)       1988      
+_________________________________________________________________
+elu_4 (ELU)                  (None, 256, 192, 4)       0         
+_________________________________________________________________
+average_pooling2d_4 (Average (None, 85, 64, 4)         0         
+_________________________________________________________________
+dropout_4 (Dropout)          (None, 85, 64, 4)         0         
+_________________________________________________________________
+conv2d_5 (Conv2D)            (None, 85, 64, 8)         520       
+_________________________________________________________________
+elu_5 (ELU)                  (None, 85, 64, 8)         0         
+_________________________________________________________________
+average_pooling2d_5 (Average (None, 28, 21, 8)         0         
+_________________________________________________________________
+dropout_5 (Dropout)          (None, 28, 21, 8)         0         
+_________________________________________________________________
+conv2d_6 (Conv2D)            (None, 28, 21, 16)        2064      
+_________________________________________________________________
+elu_6 (ELU)                  (None, 28, 21, 16)        0         
+_________________________________________________________________
+average_pooling2d_6 (Average (None, 9, 7, 16)          0         
+_________________________________________________________________
+dropout_6 (Dropout)          (None, 9, 7, 16)          0         
+_________________________________________________________________
+flatten_2 (Flatten)          (None, 1008)              0         
+_________________________________________________________________
+dense_3 (Dense)              (None, 10)                10090     
+_________________________________________________________________
+activation_2 (Activation)    (None, 10)                0         
+_________________________________________________________________
+dense_4 (Dense)              (None, 3)                 33        
+=================================================================
+Total params: 14,695
+Trainable params: 14,695
+Non-trainable params: 0
+_________________________________________________________________
+wig gave avg accuracy 0.6611111104488373/0.3128440369501574 over 10 splits
+/local/slurmtmp.632255/DATA/Modified/spectogram/amb_05.mat
+(1, 187)
+(1, 187)
+(187, 192, 512, 31)
+(192, 512, 31)
+/local/slurmtmp.632255/DATA/Modified/spectogram/amb_05_t.mat
+(1, 109)
+(1, 109)
+(109, 192, 512, 31)
+(192, 512, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_3 (InputLayer)         (None, 192, 512, 31)      0         
+_________________________________________________________________
+conv2d_7 (Conv2D)            (None, 192, 512, 4)       1988      
+_________________________________________________________________
+elu_7 (ELU)                  (None, 192, 512, 4)       0         
+_________________________________________________________________
+average_pooling2d_7 (Average (None, 64, 170, 4)        0         
+_________________________________________________________________
+dropout_7 (Dropout)          (None, 64, 170, 4)        0         
+_________________________________________________________________
+conv2d_8 (Conv2D)            (None, 64, 170, 8)        520       
+_________________________________________________________________
+elu_8 (ELU)                  (None, 64, 170, 8)        0         
+_________________________________________________________________
+average_pooling2d_8 (Average (None, 21, 56, 8)         0         
+_________________________________________________________________
+dropout_8 (Dropout)          (None, 21, 56, 8)         0         
+_________________________________________________________________
+conv2d_9 (Conv2D)            (None, 21, 56, 16)        2064      
+_________________________________________________________________
+elu_9 (ELU)                  (None, 21, 56, 16)        0         
+_________________________________________________________________
+average_pooling2d_9 (Average (None, 7, 18, 16)         0         
+_________________________________________________________________
+dropout_9 (Dropout)          (None, 7, 18, 16)         0         
+_________________________________________________________________
+flatten_3 (Flatten)          (None, 2016)              0         
+_________________________________________________________________
+dense_5 (Dense)              (None, 10)                20170     
+_________________________________________________________________
+activation_3 (Activation)    (None, 10)                0         
+_________________________________________________________________
+dense_6 (Dense)              (None, 3)                 33        
+=================================================================
+Total params: 24,775
+Trainable params: 24,775
+Non-trainable params: 0
+_________________________________________________________________
+amb gave avg accuracy 0.6309941530227661/0.31284403701167596 over 10 splits
+/local/slurmtmp.632255/DATA/Modified/spectogram/cwt_05.mat
+(1, 187)
+(1, 187)
+(187, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.632255/DATA/Modified/spectogram/cwt_05_t.mat
+(1, 109)
+(1, 109)
+(109, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_4 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_10 (Conv2D)           (None, 192, 47, 4)        1988      
+_________________________________________________________________
+elu_10 (ELU)                 (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_10 (Averag (None, 64, 15, 4)         0         
+_________________________________________________________________
+dropout_10 (Dropout)         (None, 64, 15, 4)         0         
+_________________________________________________________________
+conv2d_11 (Conv2D)           (None, 64, 15, 8)         520       
+_________________________________________________________________
+elu_11 (ELU)                 (None, 64, 15, 8)         0         
+_________________________________________________________________
+average_pooling2d_11 (Averag (None, 21, 5, 8)          0         
+_________________________________________________________________
+dropout_11 (Dropout)         (None, 21, 5, 8)          0         
+_________________________________________________________________
+conv2d_12 (Conv2D)           (None, 21, 5, 16)         2064      
+_________________________________________________________________
+elu_12 (ELU)                 (None, 21, 5, 16)         0         
+_________________________________________________________________
+average_pooling2d_12 (Averag (None, 7, 1, 16)          0         
+_________________________________________________________________
+dropout_12 (Dropout)         (None, 7, 1, 16)          0         
+_________________________________________________________________
+flatten_4 (Flatten)          (None, 112)               0         
+_________________________________________________________________
+dense_7 (Dense)              (None, 10)                1130      
+_________________________________________________________________
+activation_4 (Activation)    (None, 10)                0         
+_________________________________________________________________
+dense_8 (Dense)              (None, 3)                 33        
+=================================================================
+Total params: 5,735
+Trainable params: 5,735
+Non-trainable params: 0
+_________________________________________________________________
+cwt gave avg accuracy 0.6570175498723984/0.31559633104762896 over 10 splits
+/local/slurmtmp.632255/DATA/Modified/spectogram/slep_05.mat
+(1, 187)
+(1, 187)
+(187, 256, 192, 31)
+(256, 192, 31)
+/local/slurmtmp.632255/DATA/Modified/spectogram/slep_05_t.mat
+(1, 109)
+(1, 109)
+(109, 256, 192, 31)
+(256, 192, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_5 (InputLayer)         (None, 256, 192, 31)      0         
+_________________________________________________________________
+conv2d_13 (Conv2D)           (None, 256, 192, 4)       1988      
+_________________________________________________________________
+elu_13 (ELU)                 (None, 256, 192, 4)       0         
+_________________________________________________________________
+average_pooling2d_13 (Averag (None, 85, 64, 4)         0         
+_________________________________________________________________
+dropout_13 (Dropout)         (None, 85, 64, 4)         0         
+_________________________________________________________________
+conv2d_14 (Conv2D)           (None, 85, 64, 8)         520       
+_________________________________________________________________
+elu_14 (ELU)                 (None, 85, 64, 8)         0         
+_________________________________________________________________
+average_pooling2d_14 (Averag (None, 28, 21, 8)         0         
+_________________________________________________________________
+dropout_14 (Dropout)         (None, 28, 21, 8)         0         
+_________________________________________________________________
+conv2d_15 (Conv2D)           (None, 28, 21, 16)        2064      
+_________________________________________________________________
+elu_15 (ELU)                 (None, 28, 21, 16)        0         
+_________________________________________________________________
+average_pooling2d_15 (Averag (None, 9, 7, 16)          0         
+_________________________________________________________________
+dropout_15 (Dropout)         (None, 9, 7, 16)          0         
+_________________________________________________________________
+flatten_5 (Flatten)          (None, 1008)              0         
+_________________________________________________________________
+dense_9 (Dense)              (None, 10)                10090     
+_________________________________________________________________
+activation_5 (Activation)    (None, 10)                0         
+_________________________________________________________________
+dense_10 (Dense)             (None, 3)                 33        
+=================================================================
+Total params: 14,695
+Trainable params: 14,695
+Non-trainable params: 0
+_________________________________________________________________
+slep gave avg accuracy 0.6421052575111389/0.35779816541786585 over 10 splits
+end time
+Thu Apr 19 19:25:50 CEST 2018
