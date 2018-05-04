@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 from sklearn.pipeline import Pipeline
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+from sklearn.neural_network import MLPClassifier
 from sklearn.svm import SVC
 from sklearn.model_selection import ShuffleSplit, cross_val_score
 
@@ -47,61 +48,69 @@ print(__doc__)
 # cue onset.
 tmin, tmax = -1.5, 2.5
 event_id = dict(FA=0, LM=1, OB=2)
-subject = 5
 
-x, y = data.load_single_sub(subject, cut=False, user="Damir")
-x_t = x[:, :, 768:1280]
-y = np.where(y==1)[1]
-print(x.shape, x_t.shape, y.shape)
+acc = 0
 
-info = create_info(
-    ch_names=['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'FC5', 'FC1', 'FCz',
-              'FC2', 'FC6', 'T7', 'C3', 'Cz', 'C4', 'T8', 'CP5', 'CP1', 'CP2',
-              'CP6', 'P7', 'P3', 'Pz', 'P4', 'P8', 'PO9', 'O1', 'O2', 'PO10', 'Iz'],
-    ch_types=['eeg' for _ in range(31)],
-    sfreq=512
-)
+for sub in [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19]:
+    x, y = data.load_single_sub(sub, cut=False)
+    x_t = x[:, :, 768:1280]
+    y = np.where(y==1)[1]
+    #print(x.shape, x_t.shape, y.shape)
 
-###############################################################################
-# Classification with linear discrimant analysis
+    info = create_info(
+        ch_names=['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'FC5', 'FC1', 'FCz',
+                'FC2', 'FC6', 'T7', 'C3', 'Cz', 'C4', 'T8', 'CP5', 'CP1', 'CP2',
+                'CP6', 'P7', 'P3', 'Pz', 'P4', 'P8', 'PO9', 'O1', 'O2', 'PO10', 'Iz'],
+        ch_types=['eeg' for _ in range(31)],
+        sfreq=512
+    )
 
-# Define a monte-carlo cross-validation generator (reduce variance):
-scores = []
-epochs_data = x
-epochs_data_train = x_t
-labels = y
-print("**************epochs_data_train", epochs_data_train.shape)
-cv = ShuffleSplit(10, test_size=0.2, random_state=42)
-cv_split = cv.split(epochs_data_train)
+    ###############################################################################
+    # Classification with linear discrimant analysis
 
-# Assemble a classifier
-lda = LinearDiscriminantAnalysis()
-qda = QuadraticDiscriminantAnalysis()
-svc = SVC()
-csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
+    # Define a monte-carlo cross-validation generator (reduce variance):
+    scores = []
+    epochs_data = x
+    epochs_data_train = x_t
+    labels = y
+    #print("**************epochs_data_train", epochs_data_train.shape)
+    cv = ShuffleSplit(10, test_size=0.2, random_state=42)
+    cv_split = cv.split(epochs_data_train)
 
-# Use scikit-learn Pipeline with cross_val_score function
-clf = Pipeline([('CSP', csp), ('SVC', svc)])
-clf.set_params(CSP__reg=0.5)
-scores = cross_val_score(clf, epochs_data_train, labels, cv=cv, n_jobs=1)
+    # Assemble a classifier
+    lda = LinearDiscriminantAnalysis()
+    qda = QuadraticDiscriminantAnalysis()
+    mlp = MLPClassifier(activation='tanh', solver='adam', alpha=1e-5,
+                        learning_rate='invscaling', verbose=False, max_iter=500,
+                        hidden_layer_sizes=(20, 10, 3), random_state=1)
+    svc = SVC(kernel='linear')
+    csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
 
-# Printing the results
-print(labels)
-nc = len(np.unique(labels))
-N = len(labels)
-pc = 1.0 / nc
-qc = 1 - pc
-class_balance = pc + 1.645 * (pc * qc / N)**0.5
-print("Classification accuracy: %f / Chance level for equally "\
-      "probable classes with p=0.05: %f" % (np.mean(scores),
-                                           class_balance))
+    # Use scikit-learn Pipeline with cross_val_score function
+    clf = Pipeline([('CSP', csp), ('MLP', mlp)])
+    clf.set_params(CSP__reg=0.5)
+    scores = cross_val_score(clf, epochs_data_train, labels, cv=cv, n_jobs=1)
+    acc += np.mean(scores)
 
-# plot CSP patterns estimated on full data for visualization
-csp.fit_transform(epochs_data, labels)
+    # Printing the results
+    # print(labels)
+    nc = len(np.unique(labels))
+    N = len(labels)
+    pc = 1.0 / nc
+    qc = 1 - pc
+    class_balance = pc + 1.645 * (pc * qc / N)**0.5
+    print("Classification accuracy: %f / Chance level for equally "\
+          "probable classes with p=0.05: %f" % (np.mean(scores),
+                                                class_balance))
 
-layout = read_layout('EEG1005')
-csp.plot_patterns(info, layout=layout, ch_type='eeg',
-                  units='Patterns (AU)', size=1.5)
+    # plot CSP patterns estimated on full data for visualization
+    # csp.fit_transform(epochs_data, labels)
+
+    # layout = read_layout('EEG1005')
+    # csp.plot_patterns(info, layout=layout, ch_type='eeg',
+                    # units='Patterns (AU)', size=1.5)
+
+print("avg acc: ", acc / 18.0)
 
 ###############################################################################
 # Look at performance over time
