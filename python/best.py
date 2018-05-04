@@ -30,10 +30,11 @@ print(x[0].shape, xt[0].shape)
 
 splits = 10
 n_subs = len(x)
-n_models = 20
+n_models = 10
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
+vals = np.zeros((31, ))
 
 # channels = [4, 23]
 # for i in range(n_subs):
@@ -108,6 +109,7 @@ for j in range(n_models):
                           batch_size=64, epochs=200, verbose=0)
             h = h.history
 
+            vals += np.sum(np.absolute(model.get_weights()[0]), (0, 2))
             _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
             _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
             acc += a
@@ -129,6 +131,9 @@ for j in range(n_models):
     accs2[j] = avgacc2
     print("avg accuracy over all subjects {}/{}".format(avgacc, avgacc2))
 
+print("channel values")
+for v in vals:
+    print(v)
 
 for a, a2 in sorted(zip(accs, accs2)):
     print("acc {}/{}\n".format(a, a2))

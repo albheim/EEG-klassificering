@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH -t 10:00:00
+#SBATCH -t 30:00:00
 #SBATCH -J matlab
 #SBATCH -A lu2018-2-3
 

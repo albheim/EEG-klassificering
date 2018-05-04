@@ -172,14 +172,15 @@ def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
     return mdata, my
 
 
-def load_transform(idx, trans):
+def load_transform(idx, trans, test=False):
     snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
     if len(sys.argv) > 1:
         snic_tmp = str(sys.argv[1])
     x = []
     y = []
     for sub in idx:
-        fname = '{}/DATA/Modified/spectogram/{}_{:02}.mat'.format(snic_tmp, trans, sub)
+        fname = '{}/DATA/Modified/spectogram/{}_{:02}{}.mat'.format(snic_tmp, trans, sub, 
+                                                                    '_t' if test else '')
         print(fname)
         with h5py.File(fname) as f:
             t = f['Y']
