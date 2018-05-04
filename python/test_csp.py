@@ -28,16 +28,15 @@ import matplotlib.pyplot as plt
 
 from sklearn.pipeline import Pipeline
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+from sklearn.svm import SVC
 from sklearn.model_selection import ShuffleSplit, cross_val_score
 
-from mne import Epochs, pick_types, find_events, create_info
+from mne import create_info
 from mne.channels import read_layout
-from mne.io import concatenate_raws, read_raw_edf, RawArray
-from mne.datasets import eegbci
-from mne.decoding import CSP
+from csp import CSP
 
 import data
-import sys
 
 print(__doc__)
 
@@ -50,7 +49,7 @@ tmin, tmax = -1.5, 2.5
 event_id = dict(FA=0, LM=1, OB=2)
 subject = 5
 
-x, y = data.load_single_sub(subject, cut=False)
+x, y = data.load_single_sub(subject, cut=False, user="Damir")
 x_t = x[:, :, 768:1280]
 y = np.where(y==1)[1]
 print(x.shape, x_t.shape, y.shape)
@@ -77,17 +76,25 @@ cv_split = cv.split(epochs_data_train)
 
 # Assemble a classifier
 lda = LinearDiscriminantAnalysis()
+qda = QuadraticDiscriminantAnalysis()
+svc = SVC()
 csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
 
 # Use scikit-learn Pipeline with cross_val_score function
-clf = Pipeline([('CSP', csp), ('LDA', lda)])
+clf = Pipeline([('CSP', csp), ('SVC', svc)])
+clf.set_params(CSP__reg=0.5)
 scores = cross_val_score(clf, epochs_data_train, labels, cv=cv, n_jobs=1)
 
 # Printing the results
-class_balance = np.mean(labels == labels[0])
-class_balance = max(class_balance, 1. - class_balance)
-print("Classification accuracy: %f / Chance level: %f" % (np.mean(scores),
-                                                          class_balance))
+print(labels)
+nc = len(np.unique(labels))
+N = len(labels)
+pc = 1.0 / nc
+qc = 1 - pc
+class_balance = pc + 1.645 * (pc * qc / N)**0.5
+print("Classification accuracy: %f / Chance level for equally "\
+      "probable classes with p=0.05: %f" % (np.mean(scores),
+                                           class_balance))
 
 # plot CSP patterns estimated on full data for visualization
 csp.fit_transform(epochs_data, labels)
@@ -98,39 +105,39 @@ csp.plot_patterns(info, layout=layout, ch_type='eeg',
 
 ###############################################################################
 # Look at performance over time
-
-sfreq = raw.info['sfreq']
-w_length = int(sfreq * 0.5)   # running classifier: window length
-w_step = int(sfreq * 0.1)  # running classifier: window step size
-w_start = np.arange(0, epochs_data.shape[2] - w_length, w_step)
-
-scores_windows = []
-
-for train_idx, test_idx in cv_split:
-    y_train, y_test = labels[train_idx], labels[test_idx]
-
-    X_train = csp.fit_transform(epochs_data_train[train_idx], y_train)
-    X_test = csp.transform(epochs_data_train[test_idx])
-
-    # fit classifier
-    lda.fit(X_train, y_train)
-
-    # running classifier: test classifier on sliding window
-    score_this_window = []
-    for n in w_start:
-        X_test = csp.transform(epochs_data[test_idx][:, :, n:(n + w_length)])
-        score_this_window.append(lda.score(X_test, y_test))
-    scores_windows.append(score_this_window)
-
-# Plot scores over time
-w_times = (w_start + w_length / 2.) / sfreq + tmin
-
-plt.figure()
-plt.plot(w_times, np.mean(scores_windows, 0), label='Score')
-plt.axvline(0, linestyle='--', color='k', label='Onset')
-plt.axhline(0.5, linestyle='-', color='k', label='Chance')
-plt.xlabel('time (s)')
-plt.ylabel('classification accuracy')
-plt.title('Classification score over time')
-plt.legend(loc='lower right')
-plt.show()
+#
+#sfreq = info['sfreq']
+#w_length = int(sfreq * 0.5)   # running classifier: window length
+#w_step = int(sfreq * 0.1)  # running classifier: window step size
+#w_start = np.arange(0, epochs_data.shape[2] - w_length, w_step)
+#
+#scores_windows = []
+#
+#for train_idx, test_idx in cv_split:
+#    y_train, y_test = labels[train_idx], labels[test_idx]
+#
+#    X_train = csp.fit_transform(epochs_data_train[train_idx], y_train)
+#    X_test = csp.transform(epochs_data_train[test_idx])
+#
+#    # fit classifier
+#    lda.fit(X_train, y_train)
+#
+#    # running classifier: test classifier on sliding window
+#    score_this_window = []
+#    for n in w_start:
+#        X_test = csp.transform(epochs_data[test_idx][:, :, n:(n + w_length)])
+#        score_this_window.append(lda.score(X_test, y_test))
+#    scores_windows.append(score_this_window)
+#
+## Plot scores over time
+#w_times = (w_start + w_length / 2.) / sfreq + tmin
+#
+#plt.figure()
+#plt.plot(w_times, np.mean(scores_windows, 0), label='Score')
+#plt.axvline(0, linestyle='--', color='k', label='Onset')
+#plt.axhline(class_balance, linestyle='-', color='k', label='Chance')
+#plt.xlabel('time (s)')
+#plt.ylabel('classification accuracy')
+#plt.title('Classification score over time')
+#plt.legend(loc='lower right')
+#plt.show()
