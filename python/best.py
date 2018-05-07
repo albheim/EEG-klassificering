@@ -101,7 +101,6 @@ for j in range(n_models):
                           optimizer='adam',
                           metrics=['accuracy'])
             print(len(model.get_weights()))
-            print(model.get_weights()[0].shape)
 
             # fit with next kfold data
             h = model.fit(x[i][tr], y[i][tr],
@@ -109,6 +108,8 @@ for j in range(n_models):
                           batch_size=64, epochs=200, verbose=0)
             h = h.history
 
+            print(np.mean(np.absolute(model.get_weights()[0])))
+            sys.exit(0)
             vals += np.sum(np.absolute(model.get_weights()[0]), (0, 2))
             _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
             _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
