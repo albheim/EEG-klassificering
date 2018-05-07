@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -t 60:00:00
-#SBATCH -J bestvals
+#SBATCH -J best3ch
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -42,7 +42,7 @@ du -h "${SNIC_TMP}/DATA"
 echo "copy done time"
 date
 
-#python $PY_FILE $SNIC_TMP
+python $PY_FILE $SNIC_TMP
 
 echo "end time"
 date
