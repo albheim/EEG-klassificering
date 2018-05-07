@@ -285,6 +285,8 @@ else
     error('Here are just 4 layouts for 31, 56, 61 and 64 channels in EaisyCap Enterprises');
 end
 % % % comparing desired labels with original general labels
+labels
+lay.label
 [~,b] = (ismember(labels, lay.label));   %b are the desired nodes' indexes from the gral layout
 r_nodepos = lay.pos(b, :);      %position of desired nodes depending on the layout
 
