@@ -29,8 +29,10 @@ def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transp
                                                   name))
         trials = m[name][0][0][2][0]
         for j in range(trials.shape[0]):
-            if cut:
+            if cut is True:
                 trials[j] = trials[j][:, 768:1536]
+            elif cut is not False:
+                trials[j] = trials[j][:, cut[0]:cut[1]]
             if transpose:
                 trials[j] = trials[j].T
         labels = np.zeros((trials.shape[0], 3))
@@ -85,8 +87,8 @@ def load_all(cut=True, visual=True, study=True, transpose=False):
             x = xn
             y = yn
         else:
-            x = np.concatenate((x, x), axis=0)
-            y = np.concatenate((y, y), axis=0)
+            x = np.concatenate((x, xn), axis=0)
+            y = np.concatenate((y, yn), axis=0)
 
     print(x.shape, y.shape)
     x = np.stack(x, axis=0)
