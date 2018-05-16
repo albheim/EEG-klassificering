@@ -15,7 +15,7 @@ addpath(genpath('C:\Users\Albin Heimerson\Desktop\exjobb\DATA'))
 addpath(genpath('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA'))
 
 if nargin < 3
-    testflag = 0
+    testflag = 0;
 end
 
 if (~ischar(dType))
