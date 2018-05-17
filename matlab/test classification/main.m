@@ -6,8 +6,8 @@ visStr = {'01','02','03','04','05','06','07','08','09',...
 verStr = {'01','02','06','07','08','09','10','11','12',...
     '14','15','16','17','18','19','20','21','22'};
 
-acc = zeros(36,3);
-predAcc = zeros(36,3);
+acc = zeros(36,5);
+predAcc = zeros(36,5);
 for i = 1:36
     if i < 19
         type = 'Visual';
@@ -26,8 +26,8 @@ for i = 1:36
     Xtest = aux_extr(Xtest,769:1280);
     %X = aux_chan(X,15);
     %X = aux_svd(X,1:2);
-    %X = aux_deci(X,r);
-    %Xtest = aux_deci(Xtest,r);
+    X = aux_deci(X,r);
+    Xtest = aux_deci(Xtest,r);
     %X = aux_feat(X);
     %X = aux_covm(X);
     %X = aux_chan(X,1:2);

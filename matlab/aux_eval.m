@@ -5,10 +5,10 @@ function [ acc, predAcc ] = aux_eval( X,Y,plotflag,Xtest,Ytest )
 if nargin<3
     plotflag = 0;
 end
-acc = zeros(3,1);
+acc = zeros(5,1);
 test = (nargin > 3);
 if test
-    predAcc = zeros(3,1);
+    predAcc = zeros(5,1);
 end
 
 %% ECOC/SVM -- linear
@@ -62,20 +62,41 @@ if test
     label = predict(Mdl,Xtest);
     predAcc(3) = sum(label==Ytest)/length(Ytest);
 end
-%{
-%% ECOC/SVM -- polynomial
-t = templateSVM('Standardize',1,'KernelFunction','polynomial');
-ECOCModel = fitcecoc(X,Y,'Learners',t);
-CVModel = crossval(ECOCModel);
-[label,~] = kfoldPredict(CVModel);
+
+%% Random forest, bagged
+t = templateTree();
+BagMdl = fitcensemble(X,Y,'Method','Bag','Learners',t,'CrossVal','on');
+[label,~] = kfoldPredict(BagMdl);
 acc(4) = sum(label==Y)/length(Y);
 if plotflag
-    fprintf('SVM poly acc.:\n\t %1.4f\n',acc(4));
-    h = figure(2); plotconfusion(ind2vec(Y'), ind2vec(label'))
-    set(h,'Units','inches','Position',[4 6.6 4 4]);
-    title('Confusion matrix, SVM/poly');
-end
-%}
-
+    fprintf('Tree acc.:\n\t %1.4f\n',acc(3));
+    h = figure(4); plotconfusion(ind2vec(Y'), ind2vec(label'))
+    set(h,'Units','inches','Position',[4 2 4 4]);
+    title('Confusion matrix, Tree');
 end
 
+if test
+    Mdl = fitcensemble(X,Y,'Method','Bag','Learners',t);
+    label = predict(Mdl,Xtest);
+    predAcc(4) = sum(label==Ytest)/length(Ytest);
+end
+
+%% Random forest, boosted
+t = templateTree();
+BagMdl = fitcensemble(X,Y,'Method','AdaBoostM2','Learners',t,'CrossVal','on');
+[label,~] = kfoldPredict(BagMdl);
+acc(5) = sum(label==Y)/length(Y);
+if plotflag
+    fprintf('Tree acc.:\n\t %1.4f\n',acc(3));
+    h = figure(4); plotconfusion(ind2vec(Y'), ind2vec(label'))
+    set(h,'Units','inches','Position',[4 2 4 4]);
+    title('Confusion matrix, Tree');
+end
+
+if test
+    Mdl = fitcensemble(X,Y,'Method','AdaBoostM2','Learners',t);
+    label = predict(Mdl,Xtest);
+    predAcc(5) = sum(label==Ytest)/length(Ytest);
+end
+
+end
