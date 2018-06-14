@@ -1,0 +1,2610 @@
+data dir
+/lunarc/nobackup/users/albheim/EEG-klassificering
+script
+#!/bin/sh
+#SBATCH -t 60:00:00
+#SBATCH -J verbbest
+#SBATCH -A lu2018-2-3
+#// SBATCH -o stdout_%j.out
+#// SBATCH -e stderr_%j.err
+
+# shold be lu or gpu
+#SBATCH -p gpu
+
+# how many gpus, 4 per node, using many seems to crash more often so stick with 1
+#SBATCH --gres=gpu:1
+
+# use 5 cores per GPU
+#SBATCH -n 5
+#SBATCH --mem-per-cpu=3100
+
+DATA_DIR="$(cat ../data_location.txt)"
+echo "data dir"
+echo $DATA_DIR
+
+echo "script"
+cat $0
+
+PY_FILE="best.py"
+echo "py file"
+cat $PY_FILE
+
+echo "nvidia smi"
+nvidia-smi
+
+echo "start time"
+date
+
+CURR_DIR="$(pwd)"
+cd $DATA_DIR
+cp -r --parents DATA/Visual $SNIC_TMP
+cp -r --parents DATA/Verbal $SNIC_TMP
+cd $CURR_DIR
+ls $SNIC_TMP
+du -h "${SNIC_TMP}/DATA"
+
+echo "copy done time"
+date
+
+python $PY_FILE $SNIC_TMP
+
+echo "end time"
+date
+py file
+import sys
+from datetime import datetime
+
+import numpy as np
+from scipy import io
+
+import tensorflow as tf
+
+from keras.models import Sequential, Model
+from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
+from keras.layers import TimeDistributed, Lambda, AlphaDropout
+from keras.layers import SimpleRNN, RNN, LSTM, GRU
+from keras.layers import Conv1D, MaxPooling1D, Flatten
+from keras.layers import ELU, PReLU, Activation, AveragePooling1D
+
+from keras.optimizers import SGD, Adam, RMSprop, Nadam
+from keras import regularizers as rg
+from keras import backend as K
+
+from tensorflow.python.client import device_lib
+print(device_lib.list_local_devices())
+
+import data
+import util
+
+
+x, y = data.load_single(cut=True, visual=False, transpose=True)
+xt, yt = data.load_single(cut=True, visual=False, study=False, transpose=True)
+    
+print(x[0].shape, xt[0].shape)
+
+splits = 10
+n_subs = len(x)
+n_models = 10
+msets = [None for j in range(n_models)]
+accs = [0 for j in range(n_models)]
+accs2 = [0 for j in range(n_models)]
+vals = np.zeros((31, ))
+
+#channels = [25, 26, 29]
+for i in range(n_subs):
+    x[i] = x[i][:, ::4, :]
+    xt[i] = xt[i][:, ::4, :]
+
+
+def offset_slice(inputs):
+    w = 630 // 5
+    r = np.random.randint(inputs.shape[1] - w + 1)
+    return inputs[:, r:r + w, :]
+
+for j in range(n_models):
+
+    msets[j] = " " # mset
+
+    m_in = Input(shape=x[0][0].shape)
+    m_off = Lambda(offset_slice)(m_in)
+    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+
+    m_t = Conv1D(30, 64, padding='causal')(m_in)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.2)(m_t)
+
+    m_t = Conv1D(15, 32, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.3)(m_t)
+
+    m_t = Conv1D(10, 16, padding='causal')(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling1D(2)(m_t)
+    m_t = Dropout(0.4)(m_t)
+
+    m_t = Flatten()(m_t)
+    # m_t = Dense(35)(m_t)
+    # m_t = BatchNormalization()(m_t)
+    # m_t = Activation('tanh')(m_t)
+    m_t = Dense(15)(m_t)
+    m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_out = Dense(3, activation='softmax')(m_t)
+
+    model = Model(inputs=m_in, outputs=m_out)
+
+    m_save = model.get_config()
+    if j == 0:
+        model.summary()
+
+    avgacc = 0
+    avgacc2 = 0
+    for i in range(n_subs):
+        xm = np.mean(x[i], axis=(0, 1))[np.newaxis, np.newaxis, :]
+        xs = np.std(x[i], axis=(0, 1))[np.newaxis, np.newaxis, :]
+        xi = (x[i] - xm) / xs
+        xti = (xt[i] - xm) / xs
+        
+        n = x[i].shape[0]
+        acc = 0
+        acc2 = 0
+        for tr, val in util.kfold(n, splits, shuffle=True):
+            # recreate model
+            model = Model.from_config(m_save)
+            model.compile(loss='categorical_crossentropy',
+                          optimizer='adam',
+                          metrics=['accuracy'])
+            # print(len(model.get_weights()))
+            print(model.get_weights()[0].shape)
+
+            # fit with next kfold data
+            h = model.fit(xi[tr], y[i][tr],
+                          # validation_data=(x[i][val], y[i][val]),
+                          batch_size=64, epochs=200, verbose=0)
+            h = h.history
+
+            # vals += np.sum(np.absolute(model.get_weights()[0]), (0, 2))
+            _, a = model.evaluate(xi[val], y[i][val], verbose=0)
+            _, a2 = model.evaluate(xti, yt[i], verbose=0)
+            acc += a
+            acc2 += a2
+
+        K.clear_session()
+
+        acc /= splits
+        acc2 /= splits
+        avgacc += acc
+        avgacc2 += acc2
+
+        print("subject {}, avg accuracy {}/{} over {} splits".format(i + 1 if i + 1 < 10 else i + 2,
+                                                                     acc, acc2, splits))
+
+    avgacc /= n_subs
+    accs[j] = avgacc
+    avgacc2 /= n_subs
+    accs2[j] = avgacc2
+    print("avg accuracy over all subjects {}/{}".format(avgacc, avgacc2))
+
+# print("channel values")
+# for v in vals:
+#     print(v / (n_models * n_subs * splits * 30 * 64))
+
+for a, a2 in sorted(zip(accs, accs2)):
+    print("acc {}/{}\n".format(a, a2))
+
+print("avg over all trials and subjects {}/{}".format(sum(accs) / len(accs), sum(accs2) / len(accs2)))
+nvidia smi
+Mon May 21 20:40:33 2018       
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 390.46                 Driver Version: 390.46                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla K80           On   | 00000000:04:00.0 Off |                    0 |
+| N/A   44C    P0    81W / 149W |  10975MiB / 11441MiB |      7%      Default |
++-------------------------------+----------------------+----------------------+
+|   1  Tesla K80           On   | 00000000:05:00.0 Off |                    0 |
+| N/A   45C    P8    32W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   2  Tesla K80           On   | 00000000:84:00.0 Off |                    0 |
+| N/A   26C    P8    26W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   3  Tesla K80           On   | 00000000:85:00.0 Off |                    0 |
+| N/A   33C    P8    30W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|    0     60506      C   python                                     10962MiB |
++-----------------------------------------------------------------------------+
+start time
+Mon May 21 20:40:33 CEST 2018
+DATA
+2.4G	/local/slurmtmp.790896/DATA/Visual
+2.4G	/local/slurmtmp.790896/DATA/Verbal
+4.7G	/local/slurmtmp.790896/DATA
+copy done time
+Mon May 21 20:41:08 CEST 2018
+2018-05-21 20:41:12.700195: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-21 20:41:12.902705: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-21 20:41:12.902816: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:41:30.840456: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:43:20.652233: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:45:11.991420: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:47:05.355910: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:48:58.593372: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:50:51.101372: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:52:44.527845: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:54:36.131860: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:56:31.414849: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 20:58:25.329535: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:00:17.711475: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:02:10.724743: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:04:02.718207: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:05:56.334294: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:07:49.769512: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:09:41.405279: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:11:35.727265: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:13:28.173732: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:15:22.602833: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:17:14.964170: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:19:06.887351: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:20:59.014187: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:22:51.699145: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:24:44.470557: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:26:36.470620: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:28:27.191751: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:30:20.292181: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:32:12.612666: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:34:04.680763: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:35:57.062005: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:37:48.348709: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:39:40.675842: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:41:33.332704: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:43:24.885651: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:45:17.995107: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:47:10.043302: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:49:03.604739: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:50:54.719237: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:52:45.033271: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:54:35.318844: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:56:26.531093: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 21:58:18.658587: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:00:10.253560: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:02:00.149501: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:03:52.846438: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:05:44.686699: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:07:36.550578: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:09:28.666133: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:11:20.531089: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:13:13.120486: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:15:05.817703: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:16:57.036323: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:18:49.538142: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:20:41.514011: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:22:34.250606: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:24:24.753178: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:26:15.150366: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:28:06.576477: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:29:57.812953: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:31:50.020580: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:33:42.319213: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:35:32.279383: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:37:25.105769: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:39:17.263154: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:41:08.106389: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:42:59.574066: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:44:51.249828: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:46:43.178189: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:48:35.725527: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:50:25.757391: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:52:18.046946: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:54:09.702324: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:56:02.991393: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:57:54.248358: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 22:59:43.879217: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:01:35.408511: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:03:26.722523: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:05:18.412316: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:07:09.920924: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:08:59.746066: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:10:51.852332: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:12:43.461218: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:14:34.035612: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:16:24.505150: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:18:15.356844: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:20:06.989443: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:21:58.843263: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:23:49.242450: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:25:40.755560: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:27:31.953905: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:29:23.928380: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:31:14.196943: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:33:03.767432: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:34:54.785881: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:36:45.914109: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:38:37.513457: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:40:29.359161: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:42:19.121311: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:44:11.290544: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:46:02.301263: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:47:53.397531: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:49:44.815217: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:51:35.887570: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:53:27.508375: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:55:19.210311: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:57:09.024183: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-21 23:59:00.532787: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:00:51.478324: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:02:44.175255: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:04:34.485178: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:06:24.816099: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:08:15.006239: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:10:04.892657: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:11:56.266365: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:13:47.806377: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:15:37.561002: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:17:30.055625: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:19:21.527161: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:21:12.293290: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:23:02.731341: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:24:52.963427: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:26:44.255132: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:28:36.411920: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:30:26.985697: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:32:18.397601: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:34:09.778805: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:36:02.781241: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:37:52.914383: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:39:42.187522: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:41:32.175045: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:43:23.017395: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:45:14.577350: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:47:06.387387: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:48:55.996677: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:50:48.520290: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:52:40.192381: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:54:31.077625: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:56:21.695849: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 00:58:12.618458: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:00:04.306745: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:01:56.046800: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:03:46.793184: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:05:39.042764: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:07:29.751871: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:09:23.047877: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:11:13.907130: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:13:03.722989: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:14:54.322262: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:16:44.346586: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:18:35.191806: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:20:27.189818: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:22:16.853874: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:24:09.406745: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:26:00.737426: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:27:51.824184: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:29:43.189037: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:31:34.123616: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:33:25.559829: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:35:17.332874: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:37:07.499043: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:38:59.932643: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:40:51.393635: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:42:44.493319: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:44:34.821947: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:46:24.738846: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:48:15.817263: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:50:06.897907: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:51:58.507583: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:53:49.875550: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:55:39.554033: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:57:31.755559: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 01:59:23.355949: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 02:01:14.451147: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 02:03:05.298296: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 02:04:56.561445: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 02:06:48.240188: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 02:08:39.666087: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 02:10:29.567359: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 02:12:21.679579: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 02:14:13.636162: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 11465320193995151618
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 208170395736979163
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+]
+loading:  Subj01_CleanData_study_FA
+loading:  Subj01_CleanData_study_LM
+loading:  Subj01_CleanData_study_OB
+loading:  Subj02_CleanData_study_FA
+loading:  Subj02_CleanData_study_LM
+loading:  Subj02_CleanData_study_OB
+loading:  Subj06_CleanData_study_FA
+loading:  Subj06_CleanData_study_LM
+loading:  Subj06_CleanData_study_OB
+loading:  Subj07_CleanData_study_FA
+loading:  Subj07_CleanData_study_LM
+loading:  Subj07_CleanData_study_OB
+loading:  Subj08_CleanData_study_FA
+loading:  Subj08_CleanData_study_LM
+loading:  Subj08_CleanData_study_OB
+loading:  Subj09_CleanData_study_FA
+loading:  Subj09_CleanData_study_LM
+loading:  Subj09_CleanData_study_OB
+loading:  Subj10_CleanData_study_FA
+loading:  Subj10_CleanData_study_LM
+loading:  Subj10_CleanData_study_OB
+loading:  Subj11_CleanData_study_FA
+loading:  Subj11_CleanData_study_LM
+loading:  Subj11_CleanData_study_OB
+loading:  Subj12_CleanData_study_FA
+loading:  Subj12_CleanData_study_LM
+loading:  Subj12_CleanData_study_OB
+loading:  Subj14_CleanData_study_FA
+loading:  Subj14_CleanData_study_LM
+loading:  Subj14_CleanData_study_OB
+loading:  Subj15_CleanData_study_FA
+loading:  Subj15_CleanData_study_LM
+loading:  Subj15_CleanData_study_OB
+loading:  Subj16_CleanData_study_FA
+loading:  Subj16_CleanData_study_LM
+loading:  Subj16_CleanData_study_OB
+loading:  Subj17_CleanData_study_FA
+loading:  Subj17_CleanData_study_LM
+loading:  Subj17_CleanData_study_OB
+loading:  Subj18_CleanData_study_FA
+loading:  Subj18_CleanData_study_LM
+loading:  Subj18_CleanData_study_OB
+loading:  Subj19_CleanData_study_FA
+loading:  Subj19_CleanData_study_LM
+loading:  Subj19_CleanData_study_OB
+loading:  Subj20_CleanData_study_FA
+loading:  Subj20_CleanData_study_LM
+loading:  Subj20_CleanData_study_OB
+loading:  Subj21_CleanData_study_FA
+loading:  Subj21_CleanData_study_LM
+loading:  Subj21_CleanData_study_OB
+loading:  Subj22_CleanData_study_FA
+loading:  Subj22_CleanData_study_LM
+loading:  Subj22_CleanData_study_OB
+loading:  Subj01_CleanData_test_FA_lexical
+loading:  Subj01_CleanData_test_LM_lexical
+loading:  Subj01_CleanData_test_OB_lexical
+loading:  Subj02_CleanData_test_FA_lexical
+loading:  Subj02_CleanData_test_LM_lexical
+loading:  Subj02_CleanData_test_OB_lexical
+loading:  Subj06_CleanData_test_FA_lexical
+loading:  Subj06_CleanData_test_LM_lexical
+loading:  Subj06_CleanData_test_OB_lexical
+loading:  Subj07_CleanData_test_FA_lexical
+loading:  Subj07_CleanData_test_LM_lexical
+loading:  Subj07_CleanData_test_OB_lexical
+loading:  Subj08_CleanData_test_FA_lexical
+loading:  Subj08_CleanData_test_LM_lexical
+loading:  Subj08_CleanData_test_OB_lexical
+loading:  Subj09_CleanData_test_FA_lexical
+loading:  Subj09_CleanData_test_LM_lexical
+loading:  Subj09_CleanData_test_OB_lexical
+loading:  Subj10_CleanData_test_FA_lexical
+loading:  Subj10_CleanData_test_LM_lexical
+loading:  Subj10_CleanData_test_OB_lexical
+loading:  Subj11_CleanData_test_FA_lexical
+loading:  Subj11_CleanData_test_LM_lexical
+loading:  Subj11_CleanData_test_OB_lexical
+loading:  Subj12_CleanData_test_FA_lexical
+loading:  Subj12_CleanData_test_LM_lexical
+loading:  Subj12_CleanData_test_OB_lexical
+loading:  Subj14_CleanData_test_FA_lexical
+loading:  Subj14_CleanData_test_LM_lexical
+loading:  Subj14_CleanData_test_OB_lexical
+loading:  Subj15_CleanData_test_FA_lexical
+loading:  Subj15_CleanData_test_LM_lexical
+loading:  Subj15_CleanData_test_OB_lexical
+loading:  Subj16_CleanData_test_FA_lexical
+loading:  Subj16_CleanData_test_LM_lexical
+loading:  Subj16_CleanData_test_OB_lexical
+loading:  Subj17_CleanData_test_FA_lexical
+loading:  Subj17_CleanData_test_LM_lexical
+loading:  Subj17_CleanData_test_OB_lexical
+loading:  Subj18_CleanData_test_FA_lexical
+loading:  Subj18_CleanData_test_LM_lexical
+loading:  Subj18_CleanData_test_OB_lexical
+loading:  Subj19_CleanData_test_FA_lexical
+loading:  Subj19_CleanData_test_LM_lexical
+loading:  Subj19_CleanData_test_OB_lexical
+loading:  Subj20_CleanData_test_FA_lexical
+loading:  Subj20_CleanData_test_LM_lexical
+loading:  Subj20_CleanData_test_OB_lexical
+loading:  Subj21_CleanData_test_FA_lexical
+loading:  Subj21_CleanData_test_LM_lexical
+loading:  Subj21_CleanData_test_OB_lexical
+loading:  Subj22_CleanData_test_FA_lexical
+loading:  Subj22_CleanData_test_LM_lexical
+loading:  Subj22_CleanData_test_OB_lexical
+(175, 768, 31) (90, 768, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 31)           0         
+_________________________________________________________________
+conv1d_1 (Conv1D)            (None, 192, 30)           59550     
+_________________________________________________________________
+batch_normalization_1 (Batch (None, 192, 30)           120       
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 30)           0         
+_________________________________________________________________
+average_pooling1d_1 (Average (None, 96, 30)            0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 30)            0         
+_________________________________________________________________
+conv1d_2 (Conv1D)            (None, 96, 15)            14415     
+_________________________________________________________________
+batch_normalization_2 (Batch (None, 96, 15)            60        
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 15)            0         
+_________________________________________________________________
+average_pooling1d_2 (Average (None, 48, 15)            0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 15)            0         
+_________________________________________________________________
+conv1d_3 (Conv1D)            (None, 48, 10)            2410      
+_________________________________________________________________
+batch_normalization_3 (Batch (None, 48, 10)            40        
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 10)            0         
+_________________________________________________________________
+average_pooling1d_3 (Average (None, 24, 10)            0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 10)            0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 240)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                3615      
+_________________________________________________________________
+batch_normalization_4 (Batch (None, 15)                60        
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 80,318
+Trainable params: 80,178
+Non-trainable params: 140
+_________________________________________________________________
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6503268092870712/0.3977777794996897 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.7488304138183594/0.3604166666666667 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6336257368326187/0.2876190477893466 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.8108187139034271/0.3364485989942729 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.7894736886024475/0.3458333333333333 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8938596487045288/0.32026143729491946 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.8604575157165527/0.28978102234375736 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8550000071525574/0.3573529411764706 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.7722222208976746/0.3353741496091797 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8722222208976745/0.3433962271039216 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.8388888955116272/0.3691056903057951 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.8657894730567932/0.36595744807669456 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.850000011920929/0.256701030927835 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.8960526406764984/0.31666666666666665 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.9023391783237458/0.32745097986623356 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8636842191219329/0.2945652177800303 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8929824650287628/0.3098901102831076 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.8384210526943207/0.35238095245191037 over 10 splits
+avg accuracy over all subjects 0.8241663840081955/0.33149885000943496
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6506536126136779/0.40000000238418576 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.7812865495681762/0.38125000000000003 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6570175468921662/0.28095238107300935 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.8166666746139526/0.3504672910008475 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.8157894909381866/0.3319444444444445 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8938596487045288/0.3150326792905533 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.8767973780632019/0.2788321172288299 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8850000083446503/0.35294117647058826 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.7564327538013458/0.3244897960805569 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8675438642501831/0.33584905746129323 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.8119883060455322/0.373983740370448 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.8064327508211135/0.3617021281034388 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.8616959095001221/0.2618556701030928 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.8952631652355194/0.30972222222222223 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.8760233879089355/0.30784313740099173 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8276315808296204/0.30652173990788667 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8719298243522644/0.30769230780693196 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.8178947329521179/0.3476190476971014 over 10 splits
+avg accuracy over all subjects 0.8205503991908497/0.3293721632803568
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6584967494010925/0.3877777791023254 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.7222222149372101/0.35416666666666663 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6552631586790085/0.2809523811510631 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.8181286513805389/0.357009346908498 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.810526317358017/0.375 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8356725156307221/0.3209150321830332 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.8882352888584137/0.2963503651266551 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8392105281352997/0.3720588235294118 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.773099422454834/0.3306122451615171 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8350877165794373/0.33396226485382835 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.8485380113124847/0.37723577306038 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.8114035129547119/0.3638297872340426 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.8459064364433289/0.2649484536082474 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.8534210503101349/0.30694444444444435 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.9078947365283966/0.3137254876541157 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8271052598953247/0.29782608928887744 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8441520512104035/0.2912087913889151 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.8339473724365234/0.3542857143566722 over 10 splits
+avg accuracy over all subjects 0.8115728330281046/0.3321560803177052
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6794117748737335/0.4155555574761497 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.7748538017272949/0.3479166666666667 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6289473742246627/0.27428571445601324 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.8166666686534881/0.3654205621124428 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.8157894670963287/0.35555555555555557 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8567251563072205/0.32483660069361225 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.8761437833309174/0.2905109492042204 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8705263197422027/0.3573529411764706 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.7988304078578949/0.3319727885986673 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8944444477558136/0.32735849135326894 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.7845029354095459/0.36991869871451605 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.8011695921421051/0.37340425728483406 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.8672514617443084/0.24948453608247417 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.8639473795890809/0.3055555555555555 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.8593567252159119/0.3372549011426814 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8173684298992157/0.32065217494964593 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8350877285003662/0.31648351663089064 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.8268421053886413/0.35333333341138706 over 10 splits
+avg accuracy over all subjects 0.8148814199699295/0.3342696000591696
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6689542591571808/0.40555555827087825 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.7593567192554473/0.3708333333333333 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6608187198638916/0.27619047638915833 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.8166666626930237/0.3635514028440012 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.7736842155456543/0.34444444444444444 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8616959154605865/0.3222222215015124 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.8996731996536255/0.29708029234605116 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8452631592750549/0.3691176470588235 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.7774853765964508/0.32244897914581566 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8716374337673187/0.33679245364553523 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.7909356772899627/0.3772357729634618 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.8005847930908203/0.3723404264830529 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.8619883060455322/0.2587628865979381 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.8755263149738312/0.3208333333333333 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.8976608157157898/0.33921568569015054 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8289473712444305/0.2967391308235086 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8672514677047729/0.2879120877237765 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.8231579065322876/0.35523809538710693 over 10 splits
+avg accuracy over all subjects 0.8156271285480922/0.3342507904434379
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6320261567831039/0.4122222237454521 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.7488304138183594/0.3645833333333333 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6453216403722764/0.29904761924630124 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.8166666686534881/0.3579439267098346 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.7684210538864136/0.36249999999999993 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8935672521591187/0.31960784258211355 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.9320261418819428/0.2832116791149125 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.848421049118042/0.361764705882353 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.772222226858139/0.3333333333130596 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8616959095001221/0.33962264218420357 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.8269005835056304/0.3723577232743666 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.7666666686534882/0.37340425728483406 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.9143274843692779/0.26185567010309274 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.8594736874103546/0.30833333333333335 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.8921052634716033/0.34117647029605563 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8594736933708191/0.29782608766918595 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.839473670721054/0.3263736260543158 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.8221052646636963/0.3628571429281008 over 10 splits
+avg accuracy over all subjects 0.8166513793998295/0.33766786761415823
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6852941274642944/0.41555555688010326 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.786549711227417/0.3458333333333333 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6289473682641983/0.28380952407206805 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.7997075974941253/0.3457943938324385 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.8052631676197052/0.33333333333333337 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8783625781536102/0.31372549009868517 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.8542483687400818/0.2678832118256684 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8181578934192657/0.38088235294117645 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.7891812920570374/0.32517006780420027 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8616959154605865/0.3349056608553203 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.8228070139884949/0.37235772395279343 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.8002923965454102/0.364893617465141 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.8672514736652375/0.26597938144329897 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.911315792798996/0.3319444444444445 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.8704678356647492/0.341176469244209 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8344736874103547/0.31086956625399387 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8877193033695221/0.30329670265808206 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.8171052753925323/0.36190476197571975 over 10 splits
+avg accuracy over all subjects 0.8177133777075345/0.3332953106896672
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6748366057872772/0.41000000238418577 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.7049707710742951/0.38333333333333336 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6722222208976746/0.29047619080259685 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.7716374278068543/0.357943926375603 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.7842105329036713/0.3375 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8675438582897186/0.3366013067123157 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.87156862616539/0.27226277410875277 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8444736897945404/0.3852941176470588 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.8152046859264374/0.3333333328670385 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8616959095001221/0.3320754724291136 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.8280701696872711/0.37317073115003785 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.7672514617443085/0.3734042563971053 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.8555555582046509/0.25979381443298966 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.9013157904148101/0.30138888888888893 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.9134502947330475/0.3313725481430689 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8339473664760589/0.31956521901099577 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8809941530227661/0.3065934068717799 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.839473694562912/0.3666666667376246 over 10 splits
+avg accuracy over all subjects 0.8160234898328781/0.3372653326829161
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.6843137383460999/0.42222222440772583 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.7435672521591187/0.33125 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6894736886024475/0.2647619048683416 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.7947368383407593/0.33925233764626156 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.778947365283966/0.3416666666666667 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.8616959095001221/0.3169934637406293 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.8591503202915192/0.275182481925853 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8534210503101349/0.36764705882352944 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.7932748556137085/0.334693877449652 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8991228103637695/0.32075471762778623 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.8374269008636475/0.36178861766811304 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.7991228103637695/0.3712765976469568 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.8561403512954712/0.2608247422680412 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.9171052753925324/0.3236111111111111 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.9146198809146882/0.3274509805674647 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8273684263229371/0.29891304490358933 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8666666686534882/0.3164835162542678 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.83368421792984/0.35619047626143413 over 10 splits
+avg accuracy over all subjects 0.8227687978082234/0.32949798999096797
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 1, avg accuracy 0.7202614426612854/0.4000000024504131 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 2, avg accuracy 0.8076023519039154/0.38749999999999996 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 3, avg accuracy 0.6406432777643204/0.2885714287701107 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 4, avg accuracy 0.7999999940395355/0.3383177580955987 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 5, avg accuracy 0.778947377204895/0.3458333333333333 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 6, avg accuracy 0.856725150346756/0.3169934639548944 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 7, avg accuracy 0.8986928045749665/0.27445255501644455 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 8, avg accuracy 0.8068421125411988/0.38382352941176473 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 9, avg accuracy 0.799122816324234/0.3414965986191821 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 11, avg accuracy 0.8614035069942474/0.33207547226042117 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 12, avg accuracy 0.8441520452499389/0.3666666660245841 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 13, avg accuracy 0.7774853765964508/0.36702127665915396 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 14, avg accuracy 0.8564327597618103/0.25773195876288657 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 15, avg accuracy 0.8902631640434265/0.31111111111111117 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 16, avg accuracy 0.870175439119339/0.3235294103038077 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 17, avg accuracy 0.8231579065322876/0.3065217402966126 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 18, avg accuracy 0.8874269008636475/0.3098901093333632 over 10 splits
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+(64, 31, 30)
+subject 19, avg accuracy 0.8173684239387512/0.3733333334042913 over 10 splits
+avg accuracy over all subjects 0.8187057139145004/0.3347149859893318
+acc 0.8115728330281046/0.3321560803177052
+
+acc 0.8148814199699295/0.3342696000591696
+
+acc 0.8156271285480922/0.3342507904434379
+
+acc 0.8160234898328781/0.3372653326829161
+
+acc 0.8166513793998295/0.33766786761415823
+
+acc 0.8177133777075345/0.3332953106896672
+
+acc 0.8187057139145004/0.3347149859893318
+
+acc 0.8205503991908497/0.3293721632803568
+
+acc 0.8227687978082234/0.32949798999096797
+
+acc 0.8241663840081955/0.33149885000943496
+
+avg over all trials and subjects 0.8178660923408136/0.3333988971077146
+end time
+Tue May 22 02:16:07 CEST 2018

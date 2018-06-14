@@ -1,0 +1,2723 @@
+data dir
+/lunarc/nobackup/users/albheim/EEG-klassificering
+script
+#!/bin/sh
+#SBATCH -t 99:00:00
+#SBATCH -J c2d_rev
+#SBATCH -A lu2018-2-3
+#// SBATCH -o stdout_%j.out
+#// SBATCH -e stderr_%j.err
+
+# shold be lu or gpu
+#SBATCH -p gpu
+
+# how many gpus, 4 per node, using many seems to crash more often so stick with 1
+#SBATCH --gres=gpu:4
+
+# use 5 cores per GPU
+#SBATCH -n 20
+#SBATCH --mem-per-cpu=3100
+
+DATA_DIR="$(cat ../data_location.txt)"
+echo "data dir"
+echo $DATA_DIR
+
+echo "script"
+cat $0
+
+PY_FILE="conv2d_spect.py"
+echo "py file"
+cat $PY_FILE
+
+echo "data file"
+cat "data.py"
+
+echo "mat file"
+cat "../matlab/save transformed/savetf.m"
+
+echo "nvidia smi"
+nvidia-smi
+
+echo "start time"
+date
+
+cp -r "${DATA_DIR}/DATA" $SNIC_TMP
+ls $SNIC_TMP
+du -h "${SNIC_TMP}/DATA"
+
+echo "copy done time"
+date
+
+#matlab -nodisplay -nosplash -nodesktop -r "run('../matlab/save transformed/savetf.m');"
+idxs=(1 2 3 4 5 6 7 8 9 11 12 13 14)
+for i in ${idxs[@]}; do
+    python $PY_FILE $SNIC_TMP $i
+done
+
+echo "end time"
+date
+py file
+import sys
+from datetime import datetime
+
+import numpy as np
+from scipy import io
+
+import tensorflow as tf
+
+from keras.models import Model
+from keras.layers import Dense, Dropout, Input, GaussianNoise, BatchNormalization
+from keras.layers import Lambda
+from keras.layers import Conv2D, MaxPooling2D, AveragePooling2D
+from keras.layers import ELU, Activation, Flatten
+
+from keras import backend as K
+from keras import regularizers as rg
+
+from tensorflow.python.client import device_lib
+print(device_lib.list_local_devices())
+
+import data
+import util
+
+funcs = ["cwt"]#["spec", "wig", "amb", "cwt", "slep"]
+sub = int(sys.argv[2])
+
+splits = 10
+
+for func in funcs:
+    xt, yt = data.load_transform([sub], func)
+    x, y = data.load_transform([sub], func, test=True)
+
+    m_in = Input(shape=x[0][0].shape)
+
+    m_t = Conv2D(4, (4, 8), padding='same')(m_in) #, kernel_regularizer=rg.l1(0.01)
+    #m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling2D((2, 4))(m_t)
+    m_t = Dropout(0.2)(m_t)
+
+    m_t = Conv2D(8, (4, 8), padding='same')(m_t)
+    #m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling2D((2, 4))(m_t)
+    m_t = Dropout(0.3)(m_t)
+
+    m_t = Conv2D(16, (4, 8), padding='same')(m_t)
+    #m_t = BatchNormalization()(m_t)
+    m_t = ELU()(m_t)
+    m_t = AveragePooling2D((2, 2))(m_t)
+    m_t = Dropout(0.3)(m_t)
+
+    m_t = Flatten()(m_t)
+    m_t = Dense(15, kernel_regularizer=rg.l1(0.01))(m_t)
+    #m_t = BatchNormalization()(m_t)
+    m_t = Activation('tanh')(m_t)
+    m_out = Dense(3, activation='softmax')(m_t)
+
+    model = Model(inputs=m_in, outputs=m_out)
+
+    m_save = model.get_config()
+    model.summary()
+
+    acc = 0
+    acc2 = 0
+    for tr, val in util.kfold(len(x[0]), splits, shuffle=True):
+
+        model = Model.from_config(m_save)
+        model.compile(loss='categorical_crossentropy',
+                      optimizer='adam',
+                      metrics=['accuracy'])
+        # fit with next kfold data
+        h = model.fit(x[0][tr], y[0][tr],
+                      #validation_data=(x[0][val], y[0][val]),
+                      batch_size=16, epochs=50, verbose=0)
+
+        _, a = model.evaluate(x[0][val], y[0][val], verbose=0)
+        _, a2 = model.evaluate(xt[0], yt[0], verbose=0)
+        acc += a
+        acc2 += a2
+
+    acc /= splits
+    acc2 /= splits
+
+    print("sub {} with {} gave avg accuracy {}/{} over {} splits".format(sub, func, acc, acc2, splits))
+data file
+import sys
+
+import numpy as np
+from scipy import io
+import h5py
+
+
+def load_single_sub(sub, cut=True, study=True, shuffle=True, visual=True, transpose=False, user="Albin"):
+    if user=="Damir":
+        snic_tmp = "/Users/damir/Documents/EEG-data"
+    else:
+        snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb/DATA"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1]) + "/DATA"
+    xn = None
+    yn = None
+    names = ["FA", "LM", "OB"]
+    for i in range(3):
+        name = "Subj{:02}_CleanData_{}_{}".format(sub,
+                                                  'study' if study else 'test',
+                                                  names[i])
+        if not study:
+            name += "_{}".format("visual" if visual else "lexical")
+
+        print("loading: ", name)
+
+        m = io.loadmat('{}/{}/{}.mat'.format(snic_tmp,
+                                                  "Visual" if visual else "Verbal",
+                                                  name))
+        trials = m[name][0][0][2][0]
+        for j in range(trials.shape[0]):
+            if cut is True:
+                trials[j] = trials[j][:, 768:1536]
+            elif cut is not False:
+                trials[j] = trials[j][:, cut[0]:cut[1]]
+            if transpose:
+                trials[j] = trials[j].T
+        labels = np.zeros((trials.shape[0], 3))
+        labels[:, i] = 1
+        if xn is None:
+            xn = trials
+            yn = labels
+        else:
+            xn = np.concatenate((xn, trials), axis=0)
+            yn = np.concatenate((yn, labels), axis=0)
+
+    xn = np.stack(xn, axis=0)
+    n = xn.shape[0]
+    s = np.arange(n)
+    if shuffle:
+        np.random.shuffle(s)
+
+    return (xn[s], yn[s])
+
+
+def load_single(idx=None, cut=True, shuffle=True, visual=True, transpose=False,
+                study=True):
+    x = []
+    y = []
+
+    if idx is None:
+        if visual:
+            idx = [i if i < 10 else i + 1 for i in range(1, 19)]
+        else:
+            idx = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+    for sub in idx:
+        xn, yn = load_single_sub(sub, cut, study, shuffle, visual, transpose)
+        x.append(xn)
+        y.append(yn)
+
+    return (x, y)
+
+
+def load_all(cut=True, visual=True, study=True, transpose=False):
+    x = None
+    y = None
+
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(1, 19)]
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+    for sub in subs:  # 19 is max
+        xn, yn = load_single_sub(sub, cut, study, False, visual, transpose)
+        if x is None:
+            x = xn
+            y = yn
+        else:
+            x = np.concatenate((x, xn), axis=0)
+            y = np.concatenate((y, yn), axis=0)
+
+    print(x.shape, y.shape)
+    x = np.stack(x, axis=0)
+    print(x.shape)
+    s = np.arange(x.shape[0])
+    np.random.shuffle(s)
+
+    return (x[s], y[s])
+
+
+def load_marg(cut=None, visual=True, shuffle=True):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    x = []
+    y = []
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(1, 19)]
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+    for sub in subs:
+        xn = None
+        yn = None
+        for i in range(3):
+            name = "Subj{:02}_{}_marg".format(sub, "Visual" if visual else "Verbal")
+            print("loading: ", name)
+            m = io.loadmat('{}/DATA/Modified/marginal/{}.mat'.format(snic_tmp, name))
+
+            trials = m['data'][0][0][i][:, 0]
+            if cut is not None:
+                for j in range(trials.shape[0]):
+                    trials[j] = trials[j][:, cut[0]:cut[1]]
+            labels = np.zeros((trials.shape[0], 3))
+            labels[:, i] = 1
+            if xn is None:
+                xn = trials
+                yn = labels
+            else:
+                xn = np.concatenate((xn, trials), axis=0)
+                yn = np.concatenate((yn, labels), axis=0)
+
+        xn = np.stack(xn, axis=0)
+        n = xn.shape[0]
+        s = np.arange(n)
+        if shuffle:
+            np.random.shuffle(s)
+        x.append(xn[s])
+        y.append(yn[s])
+
+    print(x[0].shape)
+    return (x, y)
+
+
+def cut(data, cut=[768, 1536], tcut = None):
+    if tcut is not None:
+        cut[0] = int(512 * tcut[0] + 768)
+        cut[1] = int(512 * tcut[1] + 768)
+    print(cut)
+    for sub in range(len(data)):
+        data[sub] = data[sub][:, :, cut[0]:cut[1]]
+
+
+def modify(x, y, n, nmult=0, displacement=0, cut=[768, 1536]):
+    mdata = [None for i in range(len(x))]
+    my = [None for i in range(len(x))]
+    for sub in range(len(mdata)):
+        s = x[sub].shape[0]
+        my[sub] = np.zeros((s * n, 3))
+        for j in range(0, s * n, s):
+            my[sub][j:j + s] = y[sub]
+        mdata[sub] = np.zeros((s * n, x[sub].shape[1], cut[1] - cut[0]))
+        mdata[sub][:s, :, :] = x[sub][:, :, cut[0]:cut[1]]
+        for j in range(s, s * n, s):
+            for i in range(len(x[sub])):
+                if displacement > 0:
+                    d = np.random.randint(-displacement, displacement + 1)
+                    mdata[sub][j:j + s, :, :] = x[sub][:, :, cut[0] + d:cut[1] + d]
+
+                if nmult != 0:
+                    for k in range(mdata[sub][i].shape[0]):
+                        mdata[sub][j + i, k] += nmult * np.std(mdata[sub][i, k]) * np.random.ranf(mdata[sub][i, k].shape)
+
+    return mdata, my
+
+
+def load_transform(idx, trans, test=False):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    x = []
+    y = []
+    for sub in idx:
+        fname = '{}/DATA/Modified/spectogram/{}_{:02}{}.mat'.format(snic_tmp, trans, sub, 
+                                                                    '_t' if test else '')
+        print(fname)
+        with h5py.File(fname) as f:
+            t = f['Y']
+            print(t.shape)
+            yn = np.zeros((t.shape[1], 3))
+            for i in range(t.shape[1]):
+                yn[i, int(t[0, i]) - 1] = 1
+
+            y.append(yn)
+
+            t = f['Xt']
+            print(t.shape)
+            xn = [None for i in range(t.shape[1])]
+            for i in range(t.shape[1]):
+                xn[i] = np.array(f[t[0, i]])
+
+            xn = np.stack(xn, 0)
+
+            if len(xn.shape) < 4:
+                xn = xn[:, :, :, np.newaxis]
+            else:
+                xn = np.transpose(xn, (0, 2, 3, 1))
+
+            print(xn.shape)
+            print(xn[0].shape)
+            x.append(xn)
+
+    return (x, y)
+
+
+def load_spect_downsample(visual=True, shuffle=True, ds=8):
+    snic_tmp = "C:/Users/Albin Heimerson/Desktop/exjobb"
+    if len(sys.argv) > 1:
+        snic_tmp = str(sys.argv[1])
+    x = []
+    y = []
+    if visual:
+        subs = [i if i < 10 else i + 1 for i in range(2, 19)] # change to 1
+    else:
+        subs = [1, 2, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+    for sub in subs:
+        xn = None
+        yn = None
+        for i in range(3):
+            name = "Subj{:02}_{}_spec{}".format(sub, "Visual" if visual else "Verbal", ds)
+            print("loading: ", name)
+            m = io.loadmat('{}/DATA/Modified/spect_downsample/{}.mat'.format(snic_tmp, name))
+
+            trials = m['data'][0][0][i][:, 0]
+            labels = np.zeros((trials.shape[0], 3))
+            labels[:, i] = 1
+            if xn is None:
+                xn = trials
+                yn = labels
+            else:
+                xn = np.concatenate((xn, trials), axis=0)
+                yn = np.concatenate((yn, labels), axis=0)
+
+        xn = np.stack(xn, axis=0)
+        n = xn.shape[0]
+        s = np.arange(n)
+        if shuffle:
+            np.random.shuffle(s)
+        x.append(xn[s])
+        y.append(yn[s])
+
+    print(x[0].shape)
+    return (x, y)
+mat file
+clear; clc; close all
+addpath('..')
+addpath('../borrowed code')
+
+for idx = [1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17 18 19]
+    sub = sprintf('%02d', idx);
+    [X,Y,n] = aux_load('Visual',sub);
+
+    param.L = 8; param.Fs = 512; param.NFFT = 512; param.NSTEP = 1; 
+    param.method = 'l-ind'; param.NW = 3;
+
+    %X = aux_chan(X,[5 24 29]);
+    X = aux_extr(X, 769:1536);
+    X = aux_deci(X,4);
+    %X = aux_svd(X, 1);
+
+    ms = ["spec", "wig", "amb", "cwt", "slep"]
+    for method = ms
+        Xt = aux_transform(X, method, param);
+
+        for i = 1:length(Xt)
+            Xt{i} = real(permute(Xt{i}, [2 3 1]));
+        end
+        method
+        size(Xt{1})
+
+        %save(sprintf('C:\\Users\\Albin Heimerson\\Desktop\\exjobb\\DATA\\Modified\\spectogram\\%s_%s.mat', method, sub), 'Xt', 'Y', '-v7.3')
+
+        save(sprintf('/lunarc/nobackup/users/albheim/EEG-klassificering/DATA/Modified/spectogram/%s_%s.mat', method, sub), 'Xt', 'Y', '-v7.3')
+    end
+end
+
+nvidia smi
+Tue May 22 16:34:11 2018       
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 390.46                 Driver Version: 390.46                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla K80           On   | 00000000:04:00.0 Off |                    0 |
+| N/A   24C    P8    26W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   1  Tesla K80           On   | 00000000:05:00.0 Off |                    0 |
+| N/A   28C    P8    29W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   2  Tesla K80           On   | 00000000:84:00.0 Off |                    0 |
+| N/A   23C    P8    26W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   3  Tesla K80           On   | 00000000:85:00.0 Off |                    0 |
+| N/A   30C    P8    29W / 149W |      0MiB / 11441MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|  No running processes found                                                 |
++-----------------------------------------------------------------------------+
+start time
+Tue May 22 16:34:11 CEST 2018
+DATA
+2.4G	/local/slurmtmp.791853/DATA/Visual
+2.4G	/local/slurmtmp.791853/DATA/Verbal
+388M	/local/slurmtmp.791853/DATA/Modified/marginal
+302G	/local/slurmtmp.791853/DATA/Modified/spectogram
+302G	/local/slurmtmp.791853/DATA/Modified
+307G	/local/slurmtmp.791853/DATA
+copy done time
+Tue May 22 17:40:02 CEST 2018
+2018-05-22 17:40:44.061748: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 17:40:44.865134: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:40:45.006320: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:40:45.156026: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:40:45.327761: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:40:45.328477: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 17:40:45.328597: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 17:40:45.328626: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 17:40:45.328646: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 17:40:45.328664: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 17:40:45.328705: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 17:40:45.328739: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:40:45.328763: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:40:45.328783: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:40:45.328802: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 17:42:43.394280: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:42:43.394414: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:42:43.394439: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:42:43.394457: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 12283451818343284252
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 8502371972877837633
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 8123466422683736400
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 3509736692996392099
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 6461179287270724315
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_01.mat
+(1, 185)
+(1, 185)
+(185, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_01_t.mat
+(1, 90)
+(1, 90)
+(90, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 1 with cwt gave avg accuracy 0.27777778580784795/0.33729729761948457 over 10 splits
+2018-05-22 17:46:42.452343: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 17:46:42.678585: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:46:42.810851: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:46:42.954840: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:46:43.104877: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:46:43.105543: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 17:46:43.105648: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 17:46:43.105674: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 17:46:43.105692: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 17:46:43.105708: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 17:46:43.105724: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 17:46:43.105749: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:46:43.105769: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:46:43.105810: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:46:43.105831: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 17:46:50.863272: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:46:50.863378: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:46:50.863400: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:46:50.863419: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 2613414601913268562
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 7801004337625856370
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 6206748598788215743
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 10666487700869326614
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 17045895131430759140
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_02.mat
+(1, 187)
+(1, 187)
+(187, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_02_t.mat
+(1, 74)
+(1, 74)
+(74, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 2 with cwt gave avg accuracy 0.385714291036129/0.40962566890340435 over 10 splits
+2018-05-22 17:49:55.826857: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 17:49:56.060446: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:49:56.184518: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:49:56.331130: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:49:56.465476: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:49:56.466188: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 17:49:56.466335: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 17:49:56.466368: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 17:49:56.466389: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 17:49:56.466408: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 17:49:56.466427: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 17:49:56.466456: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:49:56.466482: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:49:56.466504: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:49:56.466534: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 17:50:06.003797: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:50:06.003904: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:50:06.003926: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:50:06.003944: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 15056583587749273366
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 10020018060302851796
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 4120641272164304765
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 3063957873932336946
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 6832538246501386545
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_03.mat
+(1, 186)
+(1, 186)
+(186, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_03_t.mat
+(1, 130)
+(1, 130)
+(130, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 3 with cwt gave avg accuracy 0.37692308574914934/0.34677419414122906 over 10 splits
+2018-05-22 17:55:39.175673: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 17:55:39.386551: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:55:39.504081: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:55:39.640167: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:55:39.784732: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:55:39.785447: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 17:55:39.785567: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 17:55:39.785597: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 17:55:39.785616: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 17:55:39.785635: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 17:55:39.785652: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 17:55:39.785681: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:55:39.785705: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:55:39.785726: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:55:39.785746: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 17:55:48.979913: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:55:48.980030: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:55:48.980079: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:55:48.980100: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 1335101592919581508
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 10583086633837874801
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 12032876142575264819
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 10667346177793709934
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 3775268523970026664
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_04.mat
+(1, 185)
+(1, 185)
+(185, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_04_t.mat
+(1, 96)
+(1, 96)
+(96, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 4 with cwt gave avg accuracy 0.33555556237697604/0.38324324329157133 over 10 splits
+2018-05-22 17:59:57.989120: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 17:59:58.221633: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:59:58.344811: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:59:58.488801: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:59:58.623303: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 17:59:58.624011: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 17:59:58.624133: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 17:59:58.624163: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 17:59:58.624183: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 17:59:58.624202: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 17:59:58.624220: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 17:59:58.624259: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 17:59:58.624284: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 17:59:58.624307: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 17:59:58.624328: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:00:06.260772: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:00:06.260881: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:00:06.260905: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:00:06.260924: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 6516014064272382952
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 8392301757317005067
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 2192060745371450989
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 2054002734959743167
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 15231498391884761266
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_05.mat
+(1, 187)
+(1, 187)
+(187, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_05_t.mat
+(1, 109)
+(1, 109)
+(109, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 5 with cwt gave avg accuracy 0.35727273523807523/0.32780748744380667 over 10 splits
+2018-05-22 18:04:53.049360: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 18:04:53.282296: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:04:53.404323: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:04:53.548849: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:04:53.683959: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:04:53.684666: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 18:04:53.684786: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 18:04:53.684816: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 18:04:53.684836: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 18:04:53.684854: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 18:04:53.684871: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 18:04:53.684900: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:04:53.684923: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:04:53.684945: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:04:53.684965: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:05:03.322577: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:05:03.322688: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:05:03.322711: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:05:03.322729: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 13149456740921729759
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 13518688179006845873
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 18037808464480371530
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 1873965741434518666
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 6575068451583260851
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_06.mat
+(1, 184)
+(1, 184)
+(184, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_06_t.mat
+(1, 121)
+(1, 121)
+(121, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 6 with cwt gave avg accuracy 0.248717949539423/0.34945652199828103 over 10 splits
+2018-05-22 18:09:59.929893: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 18:10:00.138693: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:10:00.254485: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:10:00.388896: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:10:00.534003: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:10:00.534704: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 18:10:00.534822: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 18:10:00.534852: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 18:10:00.534871: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 18:10:00.534889: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 18:10:00.534907: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 18:10:00.534936: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:10:00.534960: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:10:00.534982: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:10:00.535001: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:10:09.597967: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:10:09.598076: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:10:09.598098: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:10:09.598117: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 9250802237062686634
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 18316224659320625198
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 17447168368917577555
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 4047700617472552070
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 11712855466576708465
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_07.mat
+(1, 188)
+(1, 188)
+(188, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_07_t.mat
+(1, 87)
+(1, 87)
+(87, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 7 with cwt gave avg accuracy 0.394444452226162/0.35638297827953985 over 10 splits
+2018-05-22 18:13:53.041572: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 18:13:53.263266: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:13:53.399176: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:13:53.543559: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:13:53.677564: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:13:53.678271: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 18:13:53.678395: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 18:13:53.678426: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 18:13:53.678448: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 18:13:53.678467: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 18:13:53.678485: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 18:13:53.678516: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:13:53.678550: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:13:53.678572: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:13:53.678592: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:14:01.281207: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:14:01.281330: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:14:01.281354: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:14:01.281373: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 14671498070081679612
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 16336203638269061838
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 15807785401004050186
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 6596610622060480537
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 5723562239378824099
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_08.mat
+(1, 190)
+(1, 190)
+(190, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_08_t.mat
+(1, 113)
+(1, 113)
+(113, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 8 with cwt gave avg accuracy 0.3969697028398514/0.32842105377661557 over 10 splits
+2018-05-22 18:18:46.886099: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 18:18:47.118405: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:18:47.238959: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:18:47.385653: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:18:47.522923: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:18:47.523637: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 18:18:47.523756: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 18:18:47.523786: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 18:18:47.523805: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 18:18:47.523823: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 18:18:47.523841: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 18:18:47.523869: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:18:47.523892: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:18:47.523912: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:18:47.523932: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:18:54.936449: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:18:54.936564: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:18:54.936589: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:18:54.936610: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 6871439731985418745
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 13911225796392545857
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 9823274468342379825
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 11395762459108102781
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 14669740656372371428
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_09.mat
+(1, 186)
+(1, 186)
+(186, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_09_t.mat
+(1, 83)
+(1, 83)
+(83, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 9 with cwt gave avg accuracy 0.3152777783572674/0.33440860307985737 over 10 splits
+2018-05-22 18:22:21.559053: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 18:22:21.793563: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:22:21.915750: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:22:22.060190: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:22:22.195281: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:22:22.195995: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 18:22:22.196112: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 18:22:22.196141: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 18:22:22.196161: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 18:22:22.196180: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 18:22:22.196238: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 18:22:22.196276: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:22:22.196302: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:22:22.196325: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:22:22.196346: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:22:29.740040: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:22:29.740154: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:22:29.740181: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:22:29.740204: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 1002402593928987334
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 5902885455694221692
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 14083878596247922868
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 14735753355511092360
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 8313560675346451644
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_11.mat
+(1, 182)
+(1, 182)
+(182, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_11_t.mat
+(1, 98)
+(1, 98)
+(98, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 11 with cwt gave avg accuracy 0.3500000074505806/0.31758241804091486 over 10 splits
+2018-05-22 18:26:39.993969: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 18:26:40.225774: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:26:40.347407: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:26:40.491996: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:26:40.625691: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:26:40.626387: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 18:26:40.626505: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 18:26:40.626535: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 18:26:40.626554: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 18:26:40.626572: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 18:26:40.626590: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 18:26:40.626619: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:26:40.626643: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:26:40.626690: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:26:40.626714: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:26:47.614601: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:26:47.614710: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:26:47.614734: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:26:47.614752: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 9790396763986295991
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 6511200535347400717
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 5826725400280618189
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 4255048962877386180
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 6122595834379800214
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_12.mat
+(1, 190)
+(1, 190)
+(190, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_12_t.mat
+(1, 95)
+(1, 95)
+(95, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 12 with cwt gave avg accuracy 0.2655555620789528/0.3310526321122521 over 10 splits
+2018-05-22 18:30:52.858688: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 18:30:53.091626: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:30:53.215275: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:30:53.357638: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:30:53.490344: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:30:53.491030: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 18:30:53.491146: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 18:30:53.491175: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 18:30:53.491195: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 18:30:53.491213: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 18:30:53.491250: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 18:30:53.491282: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:30:53.491308: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:30:53.491330: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:30:53.491351: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:31:03.447791: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:31:03.447907: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:31:03.447934: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:31:03.447956: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 75459046009165986
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 18179453905876782658
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 1261331997010513242
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 2172000604015265645
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 14102806242021653062
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_13.mat
+(1, 188)
+(1, 188)
+(188, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_13_t.mat
+(1, 113)
+(1, 113)
+(113, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 13 with cwt gave avg accuracy 0.38560606837272643/0.3430851069219569 over 10 splits
+2018-05-22 18:35:51.291604: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-22 18:35:51.521821: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:35:51.642560: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:35:51.775815: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:35:51.921180: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-22 18:35:51.921874: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-22 18:35:51.921993: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-22 18:35:51.922022: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-22 18:35:51.922042: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-22 18:35:51.922060: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-22 18:35:51.922078: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-22 18:35:51.922107: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:35:51.922131: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:35:51.922152: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:35:51.922172: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-22 18:35:59.951355: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-22 18:35:59.951471: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-22 18:35:59.951524: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-22 18:35:59.951549: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 2087967770464920992
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 16108265868643991384
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323080704
+locality {
+  bus_id: 1
+}
+incarnation: 14841032475239635392
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 2
+}
+incarnation: 5875026271921228383
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 6104007712686891222
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_14.mat
+(1, 191)
+(1, 191)
+(191, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.791853/DATA/Modified/spectogram/cwt_14_t.mat
+(1, 74)
+(1, 74)
+(74, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 14 with cwt gave avg accuracy 0.2553571492433548/0.37486910844972626 over 10 splits
+end time
+Tue May 22 18:39:18 CEST 2018
+2018-05-23 11:07:03.370779: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-23 11:07:05.810084: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:07:05.972379: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:07:06.132624: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:07:06.294760: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:07:06.295525: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-23 11:07:06.295661: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-23 11:07:06.295694: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-23 11:07:06.295716: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-23 11:07:06.295736: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-23 11:07:06.295766: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-23 11:07:06.295839: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:07:06.295872: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:07:06.295897: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:07:06.295920: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-23 11:08:18.377775: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:08:18.377913: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:08:18.377942: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:08:18.377971: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 12064140194373700301
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 4565899532768253422
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 1
+}
+incarnation: 14044111954580821644
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325010740
+locality {
+  bus_id: 2
+}
+incarnation: 18195703739277867034
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 17649312888770747499
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_15.mat
+(1, 181)
+(1, 181)
+(181, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_15_t.mat
+(1, 125)
+(1, 125)
+(125, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 15 with cwt gave avg accuracy 0.36794872432947157/0.3408839787937989 over 10 splits
+2018-05-23 11:13:44.281826: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-23 11:13:44.501539: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:13:44.625364: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:13:44.774793: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:13:44.911329: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:13:44.912032: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-23 11:13:44.912152: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-23 11:13:44.912182: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-23 11:13:44.912202: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-23 11:13:44.912220: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-23 11:13:44.912238: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-23 11:13:44.912269: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:13:44.912293: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:13:44.912339: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:13:44.912362: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-23 11:13:53.424442: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:13:53.424559: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:13:53.424583: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:13:53.424601: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 15298345054151146634
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 8544165088333161777
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 1
+}
+incarnation: 8406900655445903931
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325010740
+locality {
+  bus_id: 2
+}
+incarnation: 10443524580363586088
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 5390936758020128937
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_16.mat
+(1, 192)
+(1, 192)
+(192, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_16_t.mat
+(1, 62)
+(1, 62)
+(62, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 16 with cwt gave avg accuracy 0.34761905670166016/0.31406249999999997 over 10 splits
+2018-05-23 11:16:31.152945: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-23 11:16:31.364651: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:16:31.482260: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:16:31.618901: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:16:31.767996: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:16:31.768709: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-23 11:16:31.768828: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-23 11:16:31.768857: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-23 11:16:31.768876: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-23 11:16:31.768894: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-23 11:16:31.768912: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-23 11:16:31.768942: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:16:31.768990: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:16:31.769018: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:16:31.769040: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-23 11:16:39.133041: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:16:39.133171: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:16:39.133200: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:16:39.133223: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 3059272554848063283
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 5727650117395493471
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 1
+}
+incarnation: 2325333072508218129
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325010740
+locality {
+  bus_id: 2
+}
+incarnation: 13962359079044087139
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 13277846472290915108
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_17.mat
+(1, 190)
+(1, 190)
+(190, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_17_t.mat
+(1, 68)
+(1, 68)
+(68, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 17 with cwt gave avg accuracy 0.27857143729925155/0.3015789485761994 over 10 splits
+2018-05-23 11:18:59.429353: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-23 11:18:59.661252: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:18:59.783684: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:18:59.928054: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:19:00.063171: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:19:00.063911: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-23 11:19:00.064054: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-23 11:19:00.064090: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-23 11:19:00.064114: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-23 11:19:00.064135: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-23 11:19:00.064156: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-23 11:19:00.064191: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:19:00.064218: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:19:00.064243: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:19:00.064267: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-23 11:19:08.473618: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:19:08.473739: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:19:08.473779: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:19:08.473801: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 15429066048640969336
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 11659308654496651899
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 1
+}
+incarnation: 10315427749730356515
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325010740
+locality {
+  bus_id: 2
+}
+incarnation: 6658814427210230445
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 14193136345134181418
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_18.mat
+(1, 185)
+(1, 185)
+(185, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_18_t.mat
+(1, 70)
+(1, 70)
+(70, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 18 with cwt gave avg accuracy 0.2571428641676903/0.33621621591013834 over 10 splits
+2018-05-23 11:22:20.514932: I tensorflow/core/platform/cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: SSE4.1 SSE4.2 AVX AVX2 FMA
+2018-05-23 11:22:20.745116: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 0 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:04:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:22:20.866702: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 1 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:05:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:22:21.012077: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 2 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:84:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:22:21.146172: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1030] Found device 3 with properties: 
+name: Tesla K80 major: 3 minor: 7 memoryClockRate(GHz): 0.8235
+pciBusID: 0000:85:00.0
+totalMemory: 11.17GiB freeMemory: 11.10GiB
+2018-05-23 11:22:21.146869: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1045] Device peer to peer matrix
+2018-05-23 11:22:21.147009: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1051] DMA: 0 1 2 3 
+2018-05-23 11:22:21.147043: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 0:   Y Y N N 
+2018-05-23 11:22:21.147065: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 1:   Y Y N N 
+2018-05-23 11:22:21.147086: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 2:   N N Y Y 
+2018-05-23 11:22:21.147106: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1061] 3:   N N Y Y 
+2018-05-23 11:22:21.147139: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:22:21.147165: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:22:21.147188: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:22:21.147211: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+2018-05-23 11:22:29.787267: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:0) -> (device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7)
+2018-05-23 11:22:29.787822: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:1) -> (device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7)
+2018-05-23 11:22:29.787853: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:2) -> (device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7)
+2018-05-23 11:22:29.787874: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1120] Creating TensorFlow device (/device:GPU:3) -> (device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7)
+/home/albheim/.conda/envs/test/lib/python3.6/site-packages/h5py/__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+Using TensorFlow backend.
+[name: "/device:CPU:0"
+device_type: "CPU"
+memory_limit: 268435456
+locality {
+}
+incarnation: 9196957094662338719
+, name: "/device:GPU:0"
+device_type: "GPU"
+memory_limit: 11325135258
+locality {
+  bus_id: 1
+}
+incarnation: 17951156014181014047
+physical_device_desc: "device: 0, name: Tesla K80, pci bus id: 0000:04:00.0, compute capability: 3.7"
+, name: "/device:GPU:1"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 1
+}
+incarnation: 8893594025322143881
+physical_device_desc: "device: 1, name: Tesla K80, pci bus id: 0000:05:00.0, compute capability: 3.7"
+, name: "/device:GPU:2"
+device_type: "GPU"
+memory_limit: 11325010740
+locality {
+  bus_id: 2
+}
+incarnation: 7861434570217996103
+physical_device_desc: "device: 2, name: Tesla K80, pci bus id: 0000:84:00.0, compute capability: 3.7"
+, name: "/device:GPU:3"
+device_type: "GPU"
+memory_limit: 11323142964
+locality {
+  bus_id: 2
+}
+incarnation: 15464081769116476430
+physical_device_desc: "device: 3, name: Tesla K80, pci bus id: 0000:85:00.0, compute capability: 3.7"
+]
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_19.mat
+(1, 181)
+(1, 181)
+(181, 192, 47, 31)
+(192, 47, 31)
+/local/slurmtmp.796405/DATA/Modified/spectogram/cwt_19_t.mat
+(1, 91)
+(1, 91)
+(91, 192, 47, 31)
+(192, 47, 31)
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+input_1 (InputLayer)         (None, 192, 47, 31)       0         
+_________________________________________________________________
+conv2d_1 (Conv2D)            (None, 192, 47, 4)        3972      
+_________________________________________________________________
+elu_1 (ELU)                  (None, 192, 47, 4)        0         
+_________________________________________________________________
+average_pooling2d_1 (Average (None, 96, 11, 4)         0         
+_________________________________________________________________
+dropout_1 (Dropout)          (None, 96, 11, 4)         0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 96, 11, 8)         1032      
+_________________________________________________________________
+elu_2 (ELU)                  (None, 96, 11, 8)         0         
+_________________________________________________________________
+average_pooling2d_2 (Average (None, 48, 2, 8)          0         
+_________________________________________________________________
+dropout_2 (Dropout)          (None, 48, 2, 8)          0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 48, 2, 16)         4112      
+_________________________________________________________________
+elu_3 (ELU)                  (None, 48, 2, 16)         0         
+_________________________________________________________________
+average_pooling2d_3 (Average (None, 24, 1, 16)         0         
+_________________________________________________________________
+dropout_3 (Dropout)          (None, 24, 1, 16)         0         
+_________________________________________________________________
+flatten_1 (Flatten)          (None, 384)               0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 15)                5775      
+_________________________________________________________________
+activation_1 (Activation)    (None, 15)                0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 48        
+=================================================================
+Total params: 14,939
+Trainable params: 14,939
+Non-trainable params: 0
+_________________________________________________________________
+sub 19 with cwt gave avg accuracy 0.317777781188488/0.31823204563138235 over 10 splits
+end time
+Wed May 23 11:26:26 CEST 2018

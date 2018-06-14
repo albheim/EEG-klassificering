@@ -21,7 +21,8 @@ print(device_lib.list_local_devices())
 import data
 import util
 
-funcs = ["spec", "wig", "amb", "cwt", "slep"]
+funcs = ["slep"]
+#["spec", "wig", "amb", "cwt", "slep"]
 sub = int(sys.argv[2])
 
 splits = 10
@@ -32,26 +33,26 @@ for func in funcs:
 
     m_in = Input(shape=x[0][0].shape)
 
-    m_t = Conv2D(4, (8, 4), padding='same')(m_in) #, kernel_regularizer=rg.l1(0.01)
+    m_t = Conv2D(4, (4, 8), padding='same')(m_in) #, kernel_regularizer=rg.l1(0.01)
     #m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
-    m_t = AveragePooling2D((4, 1 if func == "cwt" else 4))(m_t)
+    m_t = AveragePooling2D((2, 4))(m_t)
     m_t = Dropout(0.2)(m_t)
 
-    m_t = Conv2D(8, (8, 4), padding='same')(m_t)
+    m_t = Conv2D(8, (4, 8), padding='same')(m_t)
     #m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
-    m_t = AveragePooling2D((4, 1 if func == "cwt" else 4))(m_t)
+    m_t = AveragePooling2D((2, 4))(m_t)
     m_t = Dropout(0.3)(m_t)
 
-    m_t = Conv2D(16, (8, 4), padding='same')(m_t)
+    m_t = Conv2D(16, (4, 8), padding='same')(m_t)
     #m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
-    m_t = AveragePooling2D((4, 1 if func == "cwt" else 4))(m_t)
+    m_t = AveragePooling2D((2, 2))(m_t)
     m_t = Dropout(0.3)(m_t)
 
     m_t = Flatten()(m_t)
-    m_t = Dense(10, kernel_regularizer=rg.l1(0.01))(m_t)
+    m_t = Dense(15, kernel_regularizer=rg.l1(0.01))(m_t)
     #m_t = BatchNormalization()(m_t)
     m_t = Activation('tanh')(m_t)
     m_out = Dense(3, activation='softmax')(m_t)

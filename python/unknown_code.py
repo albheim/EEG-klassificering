@@ -48,22 +48,21 @@ scores = np.zeros((steps, n_models))
 
 # create net
 m_in = Input(shape=(p_size, 31))
-# m_off = Lambda(offset_slice)(m_in)
-# m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_in) # how much noice to have????
 
-m_t = Conv1D(30, 64, padding='causal')(m_in)
+m_t = Conv1D(20, 64, padding='causal')(m_noise)
 m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling1D(2)(m_t)
 m_t = Dropout(0.2)(m_t)
 
-m_t = Conv1D(15, 32, padding='causal')(m_t)
+m_t = Conv1D(10, 32, padding='causal')(m_t)
 m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling1D(2)(m_t)
 m_t = Dropout(0.3)(m_t)
 
-m_t = Conv1D(10, 16, padding='causal')(m_t)
+m_t = Conv1D(7, 16, padding='causal')(m_t)
 m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling1D(2)(m_t)
