@@ -3,6 +3,7 @@ from datetime import datetime
 
 import numpy as np
 from scipy import io
+from scipy.signal import decimate
 
 import tensorflow as tf
 
@@ -24,13 +25,14 @@ import data
 import util
 
 
-x, y = data.load_single(cut=True, visual=True, transpose=True)
-xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
+xt, yt = data.load_single(cut=[512, 1280], visual=False, transpose=True)
+x, y = data.load_single(cut=[768, 1536], visual=False, study=False, transpose=True)
+
 print(x[0].shape, xt[0].shape)
 
 splits = 10
 n_subs = len(x)
-n_models = 10
+n_models = 5
 msets = [None for j in range(n_models)]
 accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
@@ -43,7 +45,7 @@ for i in range(n_subs):
 
 
 def offset_slice(inputs):
-    w = 630
+    w = 630 // 5
     r = np.random.randint(inputs.shape[1] - w + 1)
     return inputs[:, r:r + w, :]
 
@@ -52,10 +54,10 @@ for j in range(n_models):
     msets[j] = " " # mset
 
     m_in = Input(shape=x[0][0].shape)
-    m_off = Lambda(offset_slice)(m_in)
-    m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
+    # m_off = Lambda(offset_slice)(m_in)
+    # m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
 
-    m_t = Conv1D(30, 64, padding='causal')(m_noise)
+    m_t = Conv1D(30, 64, padding='causal')(m_in)
     m_t = BatchNormalization()(m_t)
     m_t = ELU()(m_t)
     m_t = AveragePooling1D(2)(m_t)
@@ -90,7 +92,12 @@ for j in range(n_models):
 
     avgacc = 0
     avgacc2 = 0
-    for i in [5]:#range(n_subs):
+    for i in range(n_subs):
+        xm = np.mean(x[i], axis=(0, 1))[np.newaxis, np.newaxis, :]
+        xs = np.std(x[i], axis=(0, 1))[np.newaxis, np.newaxis, :]
+        xi = (x[i] - xm) / xs
+        xti = (xt[i] - xm) / xs
+
         n = x[i].shape[0]
         acc = 0
         acc2 = 0
@@ -104,7 +111,7 @@ for j in range(n_models):
             # print(model.get_weights()[0].shape)
 
             # fit with next kfold data
-            h = model.fit(x[i], y[i],
+            h = model.fit(xi[tr], y[i][tr],
                           # validation_data=(x[i][val], y[i][val]),
                           batch_size=64, epochs=200, verbose=0)
             h = h.history
@@ -115,8 +122,8 @@ for j in range(n_models):
 
             sys.exit(0)
             # vals += np.sum(np.absolute(model.get_weights()[0]), (0, 2))
-            _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
-            _, a2 = model.evaluate(xt[i], yt[i], verbose=0)
+            _, a = model.evaluate(xi[val], y[i][val], verbose=0)
+            _, a2 = model.evaluate(xti, yt[i], verbose=0)
             acc += a
             acc2 += a2
 
@@ -138,7 +145,7 @@ for j in range(n_models):
 
 # print("channel values")
 # for v in vals:
-    # print(v)
+#     print(v / (n_models * n_subs * splits * 30 * 64))
 
 for a, a2 in sorted(zip(accs, accs2)):
     print("acc {}/{}\n".format(a, a2))

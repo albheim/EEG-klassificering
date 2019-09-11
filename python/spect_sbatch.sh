@@ -1,6 +1,6 @@
 #!/bin/sh
-#SBATCH -t 60:00:00
-#SBATCH -J all5big
+#SBATCH -t 99:00:00
+#SBATCH -J c2d_slep
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -46,7 +46,7 @@ echo "copy done time"
 date
 
 #matlab -nodisplay -nosplash -nodesktop -r "run('../matlab/save transformed/savetf.m');"
-idxs=(15 16 17 18 19)
+idxs=(1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17 18 19)
 for i in ${idxs[@]}; do
     python $PY_FILE $SNIC_TMP $i
 done

@@ -31,6 +31,7 @@ print(x[0].shape, xt[0].shape)
 #settings
 splits = 10
 n_subs = len(x)
+n_models = 1
 bin_size = 40
 n_bins = 6
 p_size = bin_size * n_bins
@@ -42,25 +43,27 @@ timepoints = range(start, last, bin_size)
 steps = len(timepoints)
 
 heatmap = np.zeros((steps, steps))
+scores = np.zeros((steps, n_models))
 
 
 # create net
 m_in = Input(shape=(p_size, 31))
-m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_in) # how much noice to have????
+# m_off = Lambda(offset_slice)(m_in)
+# m_noise = GaussianNoise(np.std(x[0][0] / 100))(m_off) # how much noice to have????
 
-m_t = Conv1D(20, 64, padding='causal')(m_noise)
+m_t = Conv1D(30, 64, padding='causal')(m_in)
 m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling1D(2)(m_t)
 m_t = Dropout(0.2)(m_t)
 
-m_t = Conv1D(10, 32, padding='causal')(m_t)
+m_t = Conv1D(15, 32, padding='causal')(m_t)
 m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling1D(2)(m_t)
 m_t = Dropout(0.3)(m_t)
 
-m_t = Conv1D(7, 16, padding='causal')(m_t)
+m_t = Conv1D(10, 16, padding='causal')(m_t)
 m_t = BatchNormalization()(m_t)
 m_t = ELU()(m_t)
 m_t = AveragePooling1D(2)(m_t)
@@ -114,3 +117,48 @@ heatmap /= n_subs
 print(heatmap)
 np.savetxt("timepoints_sub5_18reps.csv", heatmap, delimiter=',')
 
+# for mod in range(n_models):
+#     for i in range(n_subs):
+#         # get data for sub i
+#         xm = np.mean(x[i], axis=(0, 1))[np.newaxis, np.newaxis, :]
+#         xs = np.std(x[i], axis=(0, 1))[np.newaxis, np.newaxis, :]
+#         xtr = (x[i] - xm) / xs
+#         ytr = y[i]
+#         xte = (xt[i] - xm) / xs
+#         yte = yt[i]
+#
+#         n = xtr.shape[0]
+#
+#         for tr, val in util.kfold(n, splits, shuffle=True):
+#             xxt = xtr[tr]
+#             yyt = ytr[tr]
+#             xxv = xtr[val]
+#             yyv = ytr[val]
+#             for t in range(steps):
+#                 # recreate model
+#                 model = Model.from_config(m_save)
+#                 model.compile(loss='categorical_crossentropy',
+#                               optimizer='adam',
+#                               metrics=['accuracy'])
+#
+#                 # train model for time t
+#                 model.fit(xxt[:, timepoints[t]:timepoints[t]+p_size], yyt,
+#                           batch_size=8, epochs=50, verbose=0)
+#
+#                 _, a = model.evaluate(xxv[:, timepoints[t]:timepoints[t]+p_size], yyv, verbose=0)
+#                 scores[t, mod] += a
+#
+#                 # for t2 in range(steps):
+#                 #     # eval model on test data for time t2
+#                 #     _, a = model.evaluate(xte[:, timepoints[t2]:timepoints[t2]+p_size], yte, verbose=0)
+#                 #     heatmap[t, t2] += a
+#
+#             K.clear_session()
+#
+# # heatmap /= (n_subs * n_models * splits)
+# # print(heatmap)
+# # np.savetxt("timepoints2.csv", heatmap, delimiter=',')
+#
+# scores /= (n_subs * splits)
+# print(scores)
+# np.savetxt("timepoints2_scores.csv", scores, delimiter=',')

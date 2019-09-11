@@ -16,8 +16,8 @@ from tensorflow.python.client import device_lib
 print(device_lib.list_local_devices())
 
 
-x, y = data.load_single(cut=True, visual=True, transpose=True)
-xt, yt = data.load_single(cut=True, visual=True, study=False, transpose=True)
+xt, yt = data.load_single(cut=True, visual=True, transpose=True)
+x, y = data.load_single(cut=True, visual=True, study=False, transpose=True)
 print(x[0].shape, xt[0].shape)
 
 splits = 10

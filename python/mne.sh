@@ -1,6 +1,6 @@
 #!/bin/sh
-#SBATCH -t 40:00:00
-#SBATCH -J nn_swap_new_offset
+#SBATCH -t 140:00:00
+#SBATCH -J csp_mlp
 #SBATCH -A lu2018-2-3
 #// SBATCH -o stdout_%j.out
 #// SBATCH -e stderr_%j.err
@@ -15,6 +15,8 @@
 #SBATCH -n 5
 #SBATCH --mem-per-cpu=3100
 
+source activate mne
+
 DATA_DIR="$(cat ../data_location.txt)"
 echo "data dir"
 echo $DATA_DIR
@@ -22,7 +24,7 @@ echo $DATA_DIR
 echo "script"
 cat $0
 
-PY_FILE="best.py"
+PY_FILE="test_csp.py"
 echo "py file"
 cat $PY_FILE
 
