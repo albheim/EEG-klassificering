@@ -8,7 +8,7 @@ out = cell(size(in));
 for i = 1:length(in)
     [n,~] = size(in{i});
     for j = 1:n
-        out{i} = cov(in{i}');
+        out{i} = corr(in{i}');
     end
 end
 

@@ -110,6 +110,7 @@ for i in range(n_subs):
         K.clear_session()
 
 heatmap /= n_subs
+
 print(heatmap)
 np.savetxt("timepoints_sub5_18reps.csv", heatmap, delimiter=',')
 

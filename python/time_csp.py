@@ -19,12 +19,12 @@ event_id = dict(FA=0, LM=1, OB=2)
 
 acc = 0
 
-bin_size = 40
-n_bins = 6
+bin_size = 20
+n_bins = 5
 p_size = bin_size * n_bins
 
 start = 700
-end = 1600
+end = 1300
 last = end - p_size
 timepoints = range(start, last, bin_size)
 steps = len(timepoints)
@@ -46,7 +46,7 @@ info = create_info(
 #                     learning_rate='invscaling', verbose=False, max_iter=500,
 #                     hidden_layer_sizes=(20, 10, 3), random_state=1)
 # svc = SVC(kernel='linear')
-csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
+# csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
 
 # for sub in [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19]:
 #     x, y = data.load_single_sub(sub, cut=False)
@@ -55,7 +55,7 @@ csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
 #     xt, yt = data.load_single_sub(sub, cut=False, study=False)
 #     yt = np.where(yt==1)[1]
 #     #print(x.shape, x_t.shape, y.shape)
-# 
+#
 #     for i in range(steps):
 #         print("start")
 #         clf = Pipeline([('CSP', csp), ('LDA', lda)])
@@ -66,22 +66,31 @@ csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
 #             scores = clf.score(xt[:, :, timepoints[j]:timepoints[j]+p_size], yt)
 #             print("*", scores)
 #             heatmap[i,j] += np.mean(scores)
-# 
+#
 # heatmap /= 18
 # print(heatmap)
 # np.savetxt("timepoints_sub5_18reps.csv", heatmap, delimiter=',')
 
-csp = CSP(n_components=1, reg=None, log=True, norm_trace=False)
+n_comp = 4
+csp = CSP(n_components=n_comp, reg=None, log=True, norm_trace=False)
 #x, y = data.load_all(cut=[start, end])
 #y = np.where(y==1)[1]
 #print(x.shape)
-for i in range(steps):
-    x, y = data.load_all(cut=[timepoints[i], timepoints[i] + p_size])
-    y = np.where(y==1)[1]
-    csp.fit_transform(x, y)
 
-    layout = read_layout('EEG1005')
-    fig = csp.plot_patterns(info, layout=layout, ch_type='eeg', size=1.5)
-    plt.savefig("time_{}.png".format(i))
+print(timepoints)
+
+x, y = data.load_single([5], cut=False)
+x = x[0]
+y = np.where(y[0]==1)[1]
+for i in range(steps):
+    csp.fit_transform(x[:, :, timepoints[i]:timepoints[i] + p_size], y)
+
+    for j in range(n_comp):
+        layout = read_layout('EEG1005')
+        csp.plot_patterns(info, colorbar=False, layout=layout, ch_type='eeg',
+                        size=1.5, show=False, show_names=False, components=j,
+                        title="{}".format(int((timepoints[i] - 768) / 0.512)))
+        #plt.savefig('fig/sub9_time_{}_comp_{}.png'.format(i, j))
+
 
 

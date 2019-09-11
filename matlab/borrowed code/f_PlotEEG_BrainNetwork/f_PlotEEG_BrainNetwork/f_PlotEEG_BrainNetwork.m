@@ -175,7 +175,7 @@ switch n_scaling
         nx = 3.5;
         n_atribut_new = nn + (((n_atribut - min(n_atribut))*(nx-nn))/(max(n_atribut) - min(n_atribut)));
         % % % associating nodes' attributes to colormap JET
-        RGBnodes = squeeze(double2rgb(n_atribut_new, colormap(jet)));
+        RGBnodes = squeeze(double2rgb(n_atribut_new, colormap(parula)));
     otherwise
         error('type n_scaling as: ''n_fixed'' or ''n_nn2nx''')
 end
@@ -233,14 +233,14 @@ elseif strcmp(cbnet, 'wcb')
     freezeColors;                   %freezing this colorbar
 elseif strcmp(cbnet, 'ncb')
     % % % % NODOS
-    cm1 = colormap(jet);
+    cm1 = colormap(parula);
     cb1 = colorbar('Location', 'east', 'fontsize', 30);
     caxis([min(n_atribut(n_atribut>0)) max(n_atribut)]);%taking the nodes' attributes different from zero
     cbfreeze(cm1)
     freezeColors(ax1)
 elseif strcmp(cbnet, 'wncb')
     % % % % NODOS
-    cm1 = colormap(jet);
+    cm1 = colormap(parula);
     cb1 = colorbar('Location', 'east', 'fontsize', 30);
     caxis([min(n_atribut(n_atribut>0)) max(n_atribut)])
     cbfreeze(cm1)
@@ -302,9 +302,9 @@ plot(lay.outline{3}(:,1), lay.outline{3}(:,2), 'g', 'LineWidth',1, 'color', [222
 plot(lay.outline{4}(:,1), lay.outline{4}(:,2), '--k', 'LineWidth',3)
 plot(lay.outline{4}(:,1), lay.outline{4}(:,2), 'g', 'LineWidth',1, 'color', [222,184,135]./255)
 for ch = 1 : nch
-    plot(r_nodepos(ch, 1), r_nodepos(ch, 2), 'o', 'MarkerSize', 20, 'MarkerEdgeColor','k', 'MarkerFaceColor', [240,128,128]./255, 'LineWidth',1.5)
-    text(r_nodepos(ch, 1)-0.03, r_nodepos(ch, 2)-0.03, labels(ch), 'fontsize', 15);
-    text(r_nodepos(ch, 1)+0.03, r_nodepos(ch, 2)+0.03, num2str(ch),'fontsize', 15); %if you want to plot the node's numbers
+    plot(r_nodepos(ch, 1), r_nodepos(ch, 2), 'o', 'MarkerSize', 10, 'MarkerEdgeColor','k', 'MarkerFaceColor', [240,128,128]./255, 'LineWidth',1.5)
+    text(r_nodepos(ch, 1)-0.03, r_nodepos(ch, 2)-0.03, labels(ch), 'fontsize', 25);
+    %text(r_nodepos(ch, 1)+0.03, r_nodepos(ch, 2)+0.03, num2str(ch),'fontsize', 15); %if you want to plot the node's numbers
     pause(.05); %YOU CAN DEACTIVATE THIS LINE IF NOT INTEREST TO SEE THE ANIMATION OF LAYOUT
 end
 axis square;

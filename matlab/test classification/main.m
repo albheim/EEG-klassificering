@@ -8,7 +8,7 @@ verStr = {'01','02','06','07','08','09','10','11','12',...
 
 acc = zeros(36,5);
 predAcc = zeros(36,5);
-for i = 1:36
+for i = 1:18
     if i < 19
         type = 'Visual';
         num = visStr{i};
@@ -22,8 +22,8 @@ for i = 1:36
     [Xtest,Ytest,~] = aux_load(type,num,1);
     N = sum(n); r = 16;
 
-    X = aux_extr(X,769:1280);
-    Xtest = aux_extr(Xtest,769:1280);
+    X = aux_extr(X,769:1536);
+    Xtest = aux_extr(Xtest,513:1280);
     %X = aux_chan(X,15);
     %X = aux_svd(X,1:2);
     X = aux_deci(X,r);
@@ -34,7 +34,7 @@ for i = 1:36
 
     X = aux_prep(X);
     Xtest = aux_prep(Xtest);
-    [a, pa] = aux_eval(X,Y,0,Xtest,Ytest);
+    [a, pa] = aux_eval(Xtest,Ytest,0,X,Y);
     acc(i,:) = a'; predAcc(i,:) = pa';
     fprintf(['\tAcc. on val. data: ' num2str(acc(i,:)) ...
         '\n\tPrediction on test: ' num2str(predAcc(i,:)) '\n\n'])

@@ -51,9 +51,9 @@ event_id = dict(FA=0, LM=1, OB=2)
 
 acc = 0
 
-for sub in [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19]:
-    x, y = data.load_single_sub(sub, cut=False)
-    x_t = x[:, :, 768:1280]
+for sub in [5]:#[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19]:
+    x, y = data.load_single_sub(sub, cut=True)
+    x_t = x
     y = np.where(y==1)[1]
     #print(x.shape, x_t.shape, y.shape)
 
@@ -87,28 +87,30 @@ for sub in [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19]:
     csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
 
     # Use scikit-learn Pipeline with cross_val_score function
-    clf = Pipeline([('CSP', csp), ('MLP', mlp)])
-    clf.set_params(CSP__reg=0.5)
-    scores = cross_val_score(clf, epochs_data_train, labels, cv=cv, n_jobs=1)
-    acc += np.mean(scores)
+    # clf = Pipeline([('CSP', csp), ('LDA', lda)])
+    # clf.set_params(CSP__reg=0.5)
+    # scores = cross_val_score(clf, epochs_data_train, labels, cv=cv, n_jobs=1)
+    # acc += np.mean(scores)
 
-    # Printing the results
-    # print(labels)
-    nc = len(np.unique(labels))
-    N = len(labels)
-    pc = 1.0 / nc
-    qc = 1 - pc
-    class_balance = pc + 1.645 * (pc * qc / N)**0.5
-    print("Classification accuracy: %f / Chance level for equally "\
-          "probable classes with p=0.05: %f" % (np.mean(scores),
-                                                class_balance))
+    # # Printing the results
+    # # print(labels)
+    # nc = len(np.unique(labels))
+    # N = len(labels)
+    # pc = 1.0 / nc
+    # qc = 1 - pc
+    # class_balance = pc + 1.645 * (pc * qc / N)**0.5
+    # print("Classification accuracy: %f / Chance level for equally "\
+    #       "probable classes with p=0.05: %f" % (np.mean(scores),
+    #                                             class_balance))
 
     # plot CSP patterns estimated on full data for visualization
-    # csp.fit_transform(epochs_data, labels)
+    csp.fit_transform(epochs_data, labels)
 
-    # layout = read_layout('EEG1005')
-    # csp.plot_patterns(info, layout=layout, ch_type='eeg',
-                    # units='Patterns (AU)', size=1.5)
+    layout = read_layout('EEG1005')
+    csp.plot_patterns(info, colorbar=True, layout=layout, ch_type='eeg',
+                      size=1.5, show=False, show_names=False, scalings=1,
+                      title="4 first CSP components")
+    plt.savefig('fig/csp_4comp_sub5_cbar.png')
 
 print("avg acc: ", acc / 18.0)
 

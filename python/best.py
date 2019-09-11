@@ -36,7 +36,7 @@ accs = [0 for j in range(n_models)]
 accs2 = [0 for j in range(n_models)]
 vals = np.zeros((31, ))
 
-channels = [25, 26, 29]
+channels = [25]
 for i in range(n_subs):
     x[i] = x[i][:, :, channels]
     xt[i] = xt[i][:, :, channels]
@@ -90,7 +90,7 @@ for j in range(n_models):
 
     avgacc = 0
     avgacc2 = 0
-    for i in range(n_subs):
+    for i in [5]:#range(n_subs):
         n = x[i].shape[0]
         acc = 0
         acc2 = 0
@@ -104,11 +104,16 @@ for j in range(n_models):
             # print(model.get_weights()[0].shape)
 
             # fit with next kfold data
-            h = model.fit(x[i][tr], y[i][tr],
+            h = model.fit(x[i], y[i],
                           # validation_data=(x[i][val], y[i][val]),
                           batch_size=64, epochs=200, verbose=0)
             h = h.history
 
+            print(model.get_weights()[0].shape)
+            np.savetxt("filters.csv", model.get_weights()[0][:, 0, :],
+                       delimiter=",")
+
+            sys.exit(0)
             # vals += np.sum(np.absolute(model.get_weights()[0]), (0, 2))
             _, a = model.evaluate(x[i][val], y[i][val], verbose=0)
             _, a2 = model.evaluate(xt[i], yt[i], verbose=0)

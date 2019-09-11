@@ -2,6 +2,7 @@ clear; clc; close all
 addpath('..')
 addpath('../borrowed code')
 addpath('../albins')
+addpath(genpath('C:\Users\Albin Heimerson\Desktop\exjobb\DATA'))
 addpath('../borrowed code/f_PlotEEG_BrainNetwork/f_PlotEEG_BrainNetwork')
 [X,Y,n] = aux_load('Visual','05');
 
@@ -12,6 +13,8 @@ X = aux_extr(X, 769:1024);
 %X = aux_deci(X,2);
 %X = aux_transform(X, 'spec', param);
 X = aux_covm(X);
+
+
 
 
 figure
@@ -36,9 +39,12 @@ Xavg = sum(cat(3, X{:}), 3) / length(X);
 
 figure;
 colormap(gca,parula)
-pcolor(xx,yy,Xavg);
-title('average covariance between channels for sub 5 visual')
-xlabel('channel')
-ylabel('channel')
+imagesc(flipud(Xavg));
+title('average correlation between channels for sub 5 visual','interpreter','latex')
+xlabel('channel','interpreter','latex')
+ylabel('channel','interpreter','latex')
+load('Subj01_CleanData_study_FA.mat');
+set(gca, 'xtick', [1:31], 'xticklabels', Subj01_CleanData_study_FA.label);
+set(gca, 'ytick', [1:31], 'yticklabels', flipud(Subj01_CleanData_study_FA.label));
 hcb = colorbar
-ylabel(hcb, 'covariance')
+ylabel(hcb, 'correlation','interpreter','latex')
